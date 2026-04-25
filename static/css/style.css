@@ -1,0 +1,466 @@
+/* =============================================
+   ShopBot India — Clean Modern Minimal UI
+   Subtle • Elegant • Professional
+============================================= */
+
+:root {
+  --bg: #0B0F17;
+  --surface: #111827;
+  --surface2: #1F2937;
+  --surface3: #374151;
+
+  --accent: #6366F1;
+  --accent-light: rgba(99, 102, 241, 0.12);
+
+  --text: #E5E7EB;
+  --text2: #9CA3AF;
+  --text3: #6B7280;
+
+  --border: rgba(255, 255, 255, 0.06);
+  --border-hover: rgba(255, 255, 255, 0.12);
+
+  --radius: 16px;
+  --radius-sm: 12px;
+  --radius-xs: 8px;
+
+  --sidebar-w: 280px;
+}
+
+/* Reset & Base */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+/* Subtle Floating Particles Background */
+.particles {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.particle {
+  position: absolute;
+  background: #64748B;
+  border-radius: 50%;
+  animation: floatUp linear infinite;
+  opacity: 0.08;
+}
+
+@keyframes floatUp {
+  from {
+    transform: translateY(100vh) scale(0.8);
+  }
+  to {
+    transform: translateY(-120px) scale(1.1);
+  }
+}
+
+/* Main Layout */
+.layout {
+  display: flex;
+  height: 100vh;
+  position: relative;
+  z-index: 1;
+}
+
+/* ====================== SIDEBAR ====================== */
+.sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 10;
+}
+
+.sidebar-inner {
+  padding: 32px 26px;
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+.sidebar-inner::-webkit-scrollbar {
+  width: 4px;
+}
+.sidebar-inner::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.08);
+  border-radius: 10px;
+}
+
+/* Brand */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 42px;
+}
+
+.brand-mark {
+  width: 48px;
+  height: 48px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  flex-shrink: 0;
+}
+
+.brand-text {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.6px;
+  color: var(--text);
+}
+
+.brand-flag {
+  font-size: 22px;
+  margin-left: 4px;
+}
+
+/* Divider */
+.side-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 28px 0;
+}
+
+/* Section Label */
+.side-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text3);
+  margin-bottom: 16px;
+}
+
+/* Capabilities List */
+.cap-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.cap-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  font-size: 14.5px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+
+.cap-icon {
+  font-size: 18px;
+  width: 26px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* Sidebar Footer */
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 20px;
+}
+
+.btn-clear {
+  width: 100%;
+  padding: 13px 16px;
+  background: transparent;
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  color: #f87171;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.btn-clear:hover {
+  background: rgba(248, 113, 113, 0.08);
+  border-color: #f87171;
+}
+
+/* ====================== MAIN AREA ====================== */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+
+/* Topbar */
+.topbar {
+  background: rgba(17, 24, 39, 0.92);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  z-index: 5;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.topbar-avatar {
+  width: 42px;
+  height: 42px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+}
+
+.topbar-name {
+  font-size: 16.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.topbar-status {
+  font-size: 12.5px;
+  color: var(--text3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  background: #4ADE80;
+  border-radius: 50%;
+  animation: pulseDot 2s ease infinite;
+}
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.topbar-live {
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+  color: #4ADE80;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.live-dot {
+  width: 5px;
+  height: 5px;
+  background: #4ADE80;
+  border-radius: 50%;
+  animation: pulseDot 1.8s ease infinite;
+}
+
+/* Messages Area */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  background: var(--bg);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+.messages::-webkit-scrollbar {
+  width: 5px;
+}
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.08);
+  border-radius: 10px;
+}
+
+/* Message Bubbles */
+.msg {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  animation: msgIn 0.3s ease forwards;
+}
+
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.msg-user {
+  flex-direction: row-reverse;
+  margin-left: auto;
+}
+
+.bubble {
+  max-width: 76%;
+  padding: 16px 20px;
+  border-radius: var(--radius);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.bubble-bot {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 18px 18px 18px 6px;
+  color: var(--text);
+}
+
+.bubble-user {
+  background: var(--accent-light);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 18px 18px 6px 18px;
+  color: var(--text);
+}
+
+/* Input Area */
+.input-area {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 20px 28px 26px;
+  flex-shrink: 0;
+}
+
+.input-form {
+  width: 100%;
+}
+
+.input-shell {
+  display: flex;
+  align-items: center;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 6px 8px;
+  transition: all 0.25s ease;
+}
+
+.input-shell:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.inp {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 14px 20px;
+  font-size: 15.5px;
+  color: var(--text);
+}
+
+.inp::placeholder {
+  color: var(--text3);
+}
+
+.btn-send {
+  width: 48px;
+  height: 48px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.btn-send:hover {
+  background: #4f46e5;
+  transform: scale(1.06);
+}
+
+.input-hint {
+  text-align: center;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text3);
+}
+
+/* Intent Bar */
+.intent-bar {
+  background: var(--surface2);
+  border-top: 1px solid var(--border);
+  padding: 10px 28px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  color: var(--text2);
+  flex-shrink: 0;
+}
+
+.intent-icon {
+  font-size: 16px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+    box-shadow: 0 0 30px rgba(0,0,0,0.6);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+  
+  .messages, .input-area {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+}

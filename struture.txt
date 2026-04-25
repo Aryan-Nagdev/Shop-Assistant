@@ -1,0 +1,32 @@
+ecommerce_chatbot/
+│
+├── data/                            ← Put your dataset JSON files here
+│   ├── qa_Electronics.json
+│   ├── qa_Clothing_Shoes_and_Jewelry.json
+│   ├── qa_Home_and_Kitchen.json
+│   ├── qa_Cell_Phones_and_Accessories.json
+│   ├── qa_Sports_and_Outdoors.json
+│   ├── qa_Health_and_Personal_Care.json
+│   └── qa_Video_Games.json
+│
+├── models/
+│   └── finetuned_minilm/            ← Auto-created after training
+│
+├── src/
+│   ├── 01_clean_data.py             ← Remove duplicates, bad Q&A
+│   ├── 02_prepare_data.py           ← Tag intent + features
+│   ├── 03_build_embeddings.py       ← Fine-tune MiniLM + FAISS index
+│   ├── nlu_engine.py                ← SLM-based query understanding (intent, entities, rewrite)
+│   ├── live_search.py               ← SerpAPI India search + INR pricing + ranking
+│   └── response_builder.py          ← Writes clean, direct answers (no dataset dump)
+│
+├── static/css/style.css             ← Dark India-themed UI
+├── static/js/chat.js                ← Chat UI + product cards
+├── templates/index.html             ← Single-page chat app
+│
+├── chatbot.py                       ← Session orchestrator
+├── app.py                           ← Flask REST API
+├── config.py                        ← All settings
+├── run_pipeline.py                  ← One-shot training runner
+├── requirements.txt
+└── .env                             ← API keys

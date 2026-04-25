@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ShopBot India 🛍️</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+/* ── Variables & Reset ─────────────────────────────────────────── */
+:root {
+  --bg:         #070810;
+  --bg2:        #0c0e1a;
+  --surface:    #0f1120;
+  --surface2:   #141728;
+  --border:     #1c1f35;
+  --border2:    #252a45;
+  --saffron:    #ff6b00;
+  --saffron2:   #ff8c38;
+  --gold2:      #fbbf24;
+  --green2:     #34d399;
+  --blue:       #3b82f6;
+  --blue2:      #60a5fa;
+  --text:       #e8eaf0;
+  --text2:      #9399b2;
+  --text3:      #4b5270;
+  --radius:     14px;
+  --radius-sm:  8px;
+  --sidebar-w:  280px;
+  --font-head:  'Syne', sans-serif;
+  --font-body:  'DM Sans', sans-serif;
+  --shadow:     0 8px 32px rgba(0,0,0,.5);
+}
+
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-body); overflow: hidden; }
+
+/* Noise overlay */
+.noise {
+  position: fixed; inset: 0; pointer-events: none; z-index: 9999; opacity: .025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px;
+}
+
+/* Layout */
+.layout { display: flex; height: 100vh; overflow: hidden; position: relative; }
+
+/* ══ SIDEBAR ══════════════════════════════════════════════════════ */
+.sidebar {
+  width: var(--sidebar-w); min-width: var(--sidebar-w);
+  background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow: hidden;
+  transition: transform .3s cubic-bezier(.4,0,.2,1);
+  position: relative; z-index: 10;
+}
+.sidebar::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 200px;
+  background: radial-gradient(ellipse at 50% -20%, rgba(255,107,0,.12) 0%, transparent 70%);
+  pointer-events: none;
+}
+.sidebar-inner {
+  display: flex; flex-direction: column; height: 100%;
+  padding: 22px 16px; overflow-y: auto; overflow-x: hidden;
+  scrollbar-width: thin; scrollbar-color: var(--border2) transparent;
+}
+.sidebar-inner::-webkit-scrollbar { width: 3px; }
+.sidebar-inner::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.brand-orb {
+  width: 46px; height: 46px; border-radius: 12px; flex-shrink: 0;
+  background: linear-gradient(135deg, rgba(255,107,0,.3), rgba(255,107,0,.08));
+  border: 1px solid rgba(255,107,0,.3);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 20px rgba(255,107,0,.15);
+}
+.brand-orb-inner { font-size: 22px; }
+.brand-name { font-family: var(--font-head); font-size: 19px; font-weight: 800; color: var(--saffron); letter-spacing: -.3px; line-height: 1; }
+.flag-in { font-size: 15px; }
+.brand-sub { font-size: 11px; color: var(--text3); margin-top: 4px; }
+
+.divider { height: 1px; background: linear-gradient(90deg, transparent, var(--border2), transparent); margin: 10px 0 16px; }
+
+.side-label {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .14em;
+  color: var(--text3); font-weight: 600; font-family: var(--font-head);
+  margin-bottom: 10px; display: flex; align-items: center; gap: 7px;
+}
+.label-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--saffron); opacity: .6; }
+.side-section { margin-bottom: 6px; }
+
+.chips { display: flex; flex-direction: column; gap: 5px; }
+.chip {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 9px 12px; font-size: 12.5px; color: var(--blue2); cursor: pointer;
+  text-align: left; transition: all .15s; line-height: 1.35;
+  font-family: var(--font-body); position: relative; overflow: hidden;
+}
+.chip:hover { border-color: var(--blue); color: #fff; transform: translateX(3px); }
+
+.cap-list { list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.cap-list li { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text2); padding: 4px 0; }
+.cap-icon { font-size: 14px; flex-shrink: 0; }
+
+.sidebar-footer { margin-top: auto; padding-top: 16px; }
+.btn-clear {
+  width: 100%; background: transparent; border: 1px solid #2a1515;
+  color: #f87171; padding: 10px 14px; border-radius: var(--radius-sm);
+  font-size: 13px; cursor: pointer; transition: all .15s; font-family: var(--font-body);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.btn-clear svg { width: 14px; height: 14px; stroke: #f87171; }
+.btn-clear:hover { background: rgba(248,113,113,.08); border-color: #f87171; }
+
+/* ══ TOPBAR ════════════════════════════════════════════════════════ */
+.chat-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+.topbar {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 12px 20px; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-shrink: 0;
+}
+.menu-toggle {
+  display: none; background: none; border: none; cursor: pointer;
+  padding: 6px; border-radius: var(--radius-sm); transition: background .15s;
+}
+.menu-toggle:hover { background: var(--surface2); }
+.menu-toggle svg { width: 20px; height: 20px; stroke: var(--text2); display: block; }
+
+.topbar-center { display: flex; align-items: center; gap: 11px; flex: 1; }
+.topbar-avatar {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0; font-size: 18px;
+  background: linear-gradient(135deg, #1a2040, #0f1220); border: 1px solid var(--border2);
+  display: flex; align-items: center; justify-content: center;
+}
+.topbar-name { font-family: var(--font-head); font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: -.2px; }
+.topbar-status { font-size: 11px; color: var(--text3); display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green2); animation: pulse 2.5s ease infinite; flex-shrink: 0; }
+
+@keyframes pulse {
+  0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52,211,153,.4); }
+  50% { opacity: .8; box-shadow: 0 0 0 4px rgba(52,211,153,0); }
+}
+
+.topbar-badge {
+  background: rgba(16,185,129,.08); border: 1px solid rgba(16,185,129,.25);
+  color: var(--green2); padding: 5px 12px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; font-family: var(--font-head);
+  letter-spacing: .08em; display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
+.badge-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green2); animation: pulse 2.5s ease infinite; }
+
+/* ══ MESSAGES ══════════════════════════════════════════════════════ */
+.messages {
+  flex: 1; overflow-y: auto; padding: 24px 20px;
+  display: flex; flex-direction: column; gap: 16px;
+  scrollbar-width: thin; scrollbar-color: var(--border2) transparent;
+}
+.messages::-webkit-scrollbar { width: 4px; }
+.messages::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+.msg { display: flex; gap: 11px; animation: fadeUp .24s cubic-bezier(.2,.8,.3,1) both; }
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.msg.user { flex-direction: row-reverse; }
+
+.av {
+  width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 17px;
+}
+.av.bot { background: linear-gradient(135deg, #1a2040, #0f1220); border: 1px solid var(--border2); }
+.av.usr { background: linear-gradient(135deg, #1e0d3a, #130820); border: 1px solid #2d1a5a; }
+
+.bubble {
+  max-width: 72%; border-radius: var(--radius); padding: 14px 17px;
+  font-size: 14px; line-height: 1.7; position: relative;
+}
+.bubble.bot {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 4px var(--radius) var(--radius) var(--radius); color: #cdd3e8;
+}
+.bubble.bot::before {
+  content: ''; position: absolute; inset: 0; border-radius: inherit;
+  background: linear-gradient(160deg, rgba(255,107,0,.03) 0%, transparent 50%);
+  pointer-events: none;
+}
+.msg.user .bubble {
+  background: linear-gradient(135deg, #1a0d35, #130820);
+  border: 1px solid #2d1a5a;
+  border-radius: var(--radius) 4px var(--radius) var(--radius); color: #ddd4f5;
+}
+
+.bubble strong, .bubble b { color: var(--saffron2); font-weight: 600; }
+.bubble em { color: var(--blue2); font-style: normal; }
+.bubble a { color: var(--blue2); text-decoration: underline; text-underline-offset: 3px; }
+.bubble a:hover { color: var(--gold2); }
+.bubble h3 { font-family: var(--font-head); font-size: 15px; color: var(--text); margin: 12px 0 6px; font-weight: 700; }
+.bubble h4 { font-family: var(--font-head); font-size: 13.5px; color: #e2e8f0; margin: 10px 0 5px; font-weight: 600; }
+.bubble ul { padding-left: 18px; margin: 6px 0; }
+.bubble li { margin-bottom: 4px; color: var(--text2); }
+.bubble p { margin-bottom: 8px; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+/* Typing */
+.typing { display: flex; gap: 5px; align-items: center; padding: 4px 0; }
+.typing span {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--saffron);
+  opacity: .3; animation: typeBlink 1.1s ease infinite;
+}
+.typing span:nth-child(2) { animation-delay: .2s; }
+.typing span:nth-child(3) { animation-delay: .4s; }
+@keyframes typeBlink {
+  0%,80%,100% { opacity: .2; transform: scale(.8); }
+  40% { opacity: 1; transform: scale(1.1); background: var(--saffron2); }
+}
+
+/* ══ PRODUCT CARDS ═════════════════════════════════════════════════ */
+.cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin-top: 16px; }
+.cards-single { display: flex; justify-content: flex-start; margin-top: 16px; }
+.card-large { width: min(100%, 280px) !important; }
+
+.card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; display: flex; flex-direction: column;
+  transition: border-color .2s, transform .2s, box-shadow .2s; position: relative;
+}
+.card:hover {
+  border-color: var(--saffron); transform: translateY(-3px);
+  box-shadow: 0 8px 28px rgba(255,107,0,.18), 0 0 0 1px rgba(255,107,0,.1);
+}
+
+.card-img-wrap {
+  width: 100%; height: 130px; background: #080a14;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
+}
+.card-img { width: 100%; height: 130px; object-fit: contain; padding: 8px; transition: transform .3s; }
+.card:hover .card-img { transform: scale(1.04); }
+.card-img-ph {
+  width: 100%; height: 130px; display: flex; align-items: center; justify-content: center;
+  font-size: 38px; background: linear-gradient(135deg, #0a0c18, #080a14);
+}
+.card-large .card-img-wrap, .card-large .card-img, .card-large .card-img-ph { height: 170px; }
+
+.card-source-badge {
+  position: absolute; top: 7px; right: 7px; background: rgba(0,0,0,.7);
+  border: 1px solid var(--border2); border-radius: 4px; padding: 2px 6px;
+  font-size: 9.5px; color: var(--text2); font-family: var(--font-head);
+  backdrop-filter: blur(4px);
+}
+
+.card-body { padding: 10px 11px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.card-title {
+  font-size: 12.5px; color: var(--text); line-height: 1.45; font-weight: 500;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.card-large .card-title { font-size: 14px; -webkit-line-clamp: 3; }
+.card-price { font-family: var(--font-head); font-size: 16px; font-weight: 700; color: var(--green2); letter-spacing: -.3px; margin-top: 2px; }
+.card-large .card-price { font-size: 20px; }
+.card-rating { font-size: 11.5px; color: var(--gold2); display: flex; align-items: center; gap: 3px; }
+
+.card-btn {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: linear-gradient(135deg, var(--saffron) 0%, #e55a00 100%);
+  color: #fff !important; font-size: 12.5px; font-weight: 600; font-family: var(--font-head);
+  padding: 10px; text-decoration: none !important;
+  transition: filter .15s, transform .1s; cursor: pointer; border: none;
+}
+.card-btn:hover { filter: brightness(1.12); }
+.card-btn:active { transform: scale(.98); }
+.card-btn svg { width: 12px; height: 12px; stroke: rgba(255,255,255,.8); flex-shrink: 0; }
+.card-large .card-btn { font-size: 14px; padding: 12px; }
+
+/* ══ INTENT BAR ════════════════════════════════════════════════════ */
+.intent-bar {
+  background: var(--surface); border-top: 1px solid var(--border);
+  padding: 7px 20px; display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0; animation: slideUp .2s ease;
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.intent-icon { font-size: 13px; }
+#intentText { font-size: 11.5px; color: var(--text3); font-family: var(--font-head); letter-spacing: .03em; }
+
+/* ══ INPUT AREA ════════════════════════════════════════════════════ */
+.input-area { background: var(--surface); border-top: 1px solid var(--border); padding: 14px 18px 10px; flex-shrink: 0; }
+.input-row { display: flex; gap: 9px; align-items: center; }
+.inp-wrap { flex: 1; }
+.inp {
+  width: 100%; background: var(--bg2); border: 1.5px solid var(--border);
+  border-radius: 11px; padding: 13px 18px; font-size: 14px; color: var(--text);
+  outline: none; transition: border-color .18s, box-shadow .18s;
+  font-family: var(--font-body); caret-color: var(--saffron);
+}
+.inp:focus { border-color: var(--saffron); box-shadow: 0 0 0 3px rgba(255,107,0,.1); }
+.inp::placeholder { color: var(--text3); }
+
+.btn-send {
+  width: 46px; height: 46px; border-radius: 11px; border: none; cursor: pointer;
+  background: linear-gradient(135deg, var(--saffron) 0%, #d45000 100%);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  transition: filter .15s, transform .1s, box-shadow .15s;
+  box-shadow: 0 4px 14px rgba(255,107,0,.3);
+}
+.btn-send:hover { filter: brightness(1.1); box-shadow: 0 6px 20px rgba(255,107,0,.45); }
+.btn-send:active { transform: scale(.93); }
+.btn-send:disabled { background: var(--surface2); box-shadow: none; cursor: not-allowed; filter: none; }
+.btn-send svg { width: 17px; height: 17px; stroke: #fff; }
+
+.input-hint { font-size: 10.5px; color: var(--text3); text-align: center; margin-top: 8px; letter-spacing: .02em; }
+
+/* ══ RESPONSIVE ════════════════════════════════════════════════════ */
+@media (max-width: 700px) {
+  .sidebar { position: fixed; top: 0; left: 0; bottom: 0; transform: translateX(-100%); z-index: 100; box-shadow: var(--shadow); }
+  .sidebar.open { transform: translateX(0); }
+  .menu-toggle { display: flex; }
+  .bubble { max-width: 88%; }
+  .cards-grid { grid-template-columns: repeat(2, 1fr); }
+  .card-large { width: 100% !important; }
+}
+
+.sidebar-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,.5); z-index: 99; backdrop-filter: blur(2px);
+}
+.sidebar-overlay.active { display: block; }
+</style>
+</head>
+<body>
+
+<div class="noise"></div>
+
+<div class="layout">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-inner">
+
+      <div class="brand">
+        <div class="brand-orb"><span class="brand-orb-inner">🛍️</span></div>
+        <div>
+          <div class="brand-name">ShopBot <span class="flag-in">🇮🇳</span></div>
+          <div class="brand-sub">AI Shopping · India</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="side-section">
+        <p class="side-label"><span class="label-dot"></span>Quick Searches</p>
+        <div id="chips" class="chips">
+          <!-- Filled by JS from /api/suggestions, or fallback below -->
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="side-section">
+        <p class="side-label"><span class="label-dot"></span>Capabilities</p>
+        <ul class="cap-list">
+          <li><span class="cap-icon">⚖️</span><span>Compare brands side-by-side</span></li>
+          <li><span class="cap-icon">🥇</span><span>Find the single best pick</span></li>
+          <li><span class="cap-icon">💰</span><span>Filter by ₹ budget</span></li>
+          <li><span class="cap-icon">👗</span><span>Outfit &amp; fashion pairing</span></li>
+          <li><span class="cap-icon">📖</span><span>Answer product questions</span></li>
+          <li><span class="cap-icon">🔗</span><span>Real buy links, always</span></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-footer">
+        <button id="clearBtn" class="btn-clear">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14H6L5 6"/>
+            <path d="M10 11v6M14 11v6"/>
+            <path d="M9 6V4h6v2"/>
+          </svg>
+          Clear conversation
+        </button>
+      </div>
+
+    </div>
+  </aside>
+
+  <!-- ── Main chat ── -->
+  <main class="chat-wrap">
+
+    <header class="topbar">
+      <button class="menu-toggle" id="menuToggle" aria-label="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+      <div class="topbar-center">
+        <div class="topbar-avatar">🤖</div>
+        <div>
+          <div class="topbar-name">ShopBot India</div>
+          <div class="topbar-status">
+            <span class="status-dot"></span>
+            Live · Indian store data · ₹ INR
+          </div>
+        </div>
+      </div>
+      <div class="topbar-badge">
+        <span class="badge-dot"></span>
+        LIVE
+      </div>
+    </header>
+
+    <div class="messages" id="messages"></div>
+
+    <div id="intentBar" class="intent-bar" style="display:none">
+      <span class="intent-icon" id="intentIcon"></span>
+      <span id="intentText"></span>
+    </div>
+
+    <div class="input-area">
+      <form class="input-row" id="form">
+        <div class="inp-wrap">
+          <input id="inp" class="inp" type="text"
+            placeholder="Ask anything… e.g. 'Realme vs Vivo gaming phone'"
+            autocomplete="off" autocorrect="off" spellcheck="false"/>
+        </div>
+        <button class="btn-send" id="sendBtn" type="submit" aria-label="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </form>
+      <div class="input-hint">Powered by live Google Shopping · SerpAPI · India 🇮🇳</div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+'use strict';
+
+/* ── Session ID ─────────────────────────────────────────────────── */
+const SID = 'sb_' + Math.random().toString(36).slice(2, 10);
+
+/* ── DOM refs ────────────────────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+const msgBox     = $('messages');
+const form       = $('form');
+const inp        = $('inp');
+const sendBtn    = $('sendBtn');
+const clearBtn   = $('clearBtn');
+const chipsEl    = $('chips');
+const intentBar  = $('intentBar');
+const intentTxt  = $('intentText');
+const intentIcn  = $('intentIcon');
+const menuToggle = $('menuToggle');
+const sidebar    = $('sidebar');
+
+/* ── Intent labels ───────────────────────────────────────────────── */
+const INTENT_META = {
+  comparison:       { icon: '⚖️', label: 'Comparing products side-by-side' },
+  price_filter:     { icon: '₹',  label: 'Budget filter applied' },
+  best_in_category: { icon: '🏆', label: 'Finding top picks' },
+  single_best:      { icon: '🥇', label: 'Finding the single best option' },
+  recommendation:   { icon: '🎯', label: 'Personalised recommendation' },
+  outfit:           { icon: '👗', label: 'Outfit suggestion' },
+  pairing:          { icon: '✨', label: 'Fashion pairing' },
+  tech_spec:        { icon: '⚙️', label: 'Tech specs matched' },
+  how_to:           { icon: '📖', label: 'How-to / Info query' },
+  info_only:        { icon: '💬', label: 'Answering your question' },
+  product_search:   { icon: '🔍', label: 'Searching products' },
+  price_query:      { icon: '💰', label: 'Price lookup' },
+};
+
+/* ── Fallback chips (shown when /api/suggestions unreachable) ─────── */
+const FALLBACK_CHIPS = [
+  { icon: '💻', text: 'Dell vs HP laptop for college' },
+  { icon: '🎮', text: 'Best gaming laptop under ₹70000' },
+  { icon: '👕', text: 'White printed men\'s t-shirt under ₹500' },
+  { icon: '🎧', text: 'boAt earbuds under ₹2000' },
+  { icon: '📱', text: 'Best phone under ₹15000 India' },
+  { icon: '👟', text: 'Nike vs Adidas running shoes' },
+];
+
+/* ── Mobile sidebar ──────────────────────────────────────────────── */
+let overlay = null;
+function createOverlay() {
+  if (overlay) return;
+  overlay = document.createElement('div');
+  overlay.className = 'sidebar-overlay';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', closeSidebar);
+}
+function openSidebar()  { createOverlay(); sidebar.classList.add('open'); overlay.classList.add('active'); }
+function closeSidebar() { sidebar.classList.remove('open'); if (overlay) overlay.classList.remove('active'); }
+menuToggle.addEventListener('click', () => sidebar.classList.contains('open') ? closeSidebar() : openSidebar());
+
+/* ── Load chips ──────────────────────────────────────────────────── */
+async function loadChips() {
+  let list = FALLBACK_CHIPS;
+  try {
+    const res = await fetch('/api/suggestions');
+    if (res.ok) list = await res.json();
+  } catch {}
+  chipsEl.innerHTML = list.map(s =>
+    `<button class="chip" type="button" onclick="fillInp(${JSON.stringify(s.text)})">${s.icon} ${s.text}</button>`
+  ).join('');
+}
+function fillInp(text) { inp.value = text; inp.focus(); closeSidebar(); }
+
+/* ── Submit ──────────────────────────────────────────────────────── */
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  const msg = inp.value.trim();
+  if (!msg || sendBtn.disabled) return;
+  inp.value = '';
+  sendBtn.disabled = true;
+  hideIntentBar();
+
+  addUserMsg(msg);
+  const typingEl = addTyping();
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, session_id: SID }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    typingEl.remove();
+    addBotMsg(data);
+    showIntent(data.intent);
+  } catch (err) {
+    typingEl.remove();
+    addBotMsg({
+      answer: `⚠️ **Server not reachable.**\n\nMake sure your Flask app is running:\n\`python app.py\`\n\nThen open **http://localhost:5000** instead of Live Server.`,
+      products: [],
+      intent: '',
+    });
+  } finally {
+    sendBtn.disabled = false;
+    inp.focus();
+    scrollToBottom();
+  }
+});
+
+/* ── Clear ───────────────────────────────────────────────────────── */
+clearBtn.addEventListener('click', async () => {
+  try {
+    await fetch('/api/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: SID }),
+    });
+  } catch {}
+  msgBox.innerHTML = '';
+  hideIntentBar();
+  addGreeting();
+  closeSidebar();
+});
+
+/* ── Enter to send ───────────────────────────────────────────────── */
+inp.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    form.dispatchEvent(new Event('submit'));
+  }
+});
+
+/* ── Greeting ────────────────────────────────────────────────────── */
+function addGreeting() {
+  addBotMsg({
+    answer: [
+      `**Namaste! 🙏 I'm ShopBot India** — your AI shopping assistant.`,
+      ``,
+      `Here's what I can do for you:`,
+      `- ⚖️ **Compare brands** — e.g. *"Realme vs Vivo gaming phone"*`,
+      `- 💰 **Filter by budget** — e.g. *"Best phone under ₹15,000"*`,
+      `- 🥇 **Best single pick** — e.g. *"Suggest 1 best gaming laptop"*`,
+      `- 👗 **Outfit pairing** — e.g. *"Jeans for a blue t-shirt"*`,
+      `- 📖 **Product info** — e.g. *"How to choose a DSLR"*`,
+      `- 🔍 **Search anything** — with live ₹ prices from Indian stores`,
+      ``,
+      `Pick a suggestion on the left, or just type your query!`,
+    ].join('\n'),
+    products: [],
+    intent: '',
+  });
+}
+
+/* ── Message renderers ───────────────────────────────────────────── */
+function addUserMsg(text) {
+  const el = makeEl('div', 'msg user');
+  el.innerHTML = `<div class="av usr">👤</div><div class="bubble">${escHtml(text)}</div>`;
+  msgBox.appendChild(el);
+  scrollToBottom();
+}
+
+function addBotMsg(data) {
+  const el       = makeEl('div', 'msg');
+  const html     = mdToHtml(data.answer || '');
+  const products = data.products || [];
+  const intent   = data.intent || '';
+
+  let cardsHtml = '';
+  if (products.length > 0) {
+    if (intent === 'single_best') {
+      cardsHtml = `<div class="cards-single">${productCard(products[0], true)}</div>`;
+    } else {
+      cardsHtml = `<div class="cards-grid">${products.map(p => productCard(p, false)).join('')}</div>`;
+    }
+  }
+
+  el.innerHTML = `<div class="av bot">🤖</div><div class="bubble bot">${html}${cardsHtml}</div>`;
+  msgBox.appendChild(el);
+  scrollToBottom();
+}
+
+function addTyping() {
+  const el = makeEl('div', 'msg');
+  el.innerHTML = `<div class="av bot">🤖</div><div class="bubble bot"><div class="typing"><span></span><span></span><span></span></div></div>`;
+  msgBox.appendChild(el);
+  scrollToBottom();
+  return el;
+}
+
+/* ── Product card ────────────────────────────────────────────────── */
+function productCard(p, large = false) {
+  /* Resolve the best link available */
+  let href = '';
+  const raw = (p.link || p.product_link || '').trim();
+  if (raw.startsWith('http')) {
+    href = raw;
+  } else if (p.title) {
+    href = `https://www.flipkart.com/search?q=${encodeURIComponent(p.title)}`;
+  } else {
+    href = 'https://www.flipkart.com';
+  }
+
+  /* Image */
+  const imgSrc = p.thumbnail || p.image || '';
+  const imgHtml = imgSrc
+    ? `<img class="card-img" src="${escAttr(imgSrc)}" alt="${escAttr(p.title||'')}" loading="lazy"
+           onerror="this.style.display='none';this.nextSibling.style.display='flex'"/>
+       <div class="card-img-ph" style="display:none">🛍️</div>`
+    : `<div class="card-img-ph">🛍️</div>`;
+
+  /* Source badge */
+  const src = p.source || detectSource(href);
+  const badge = src ? `<div class="card-source-badge">${escHtml(src)}</div>` : '';
+
+  /* Rating */
+  const rating = p.rating
+    ? `<div class="card-rating">⭐ ${escHtml(String(p.rating))}${p.reviews ? ` <span style="color:var(--text3)">(${fmtReviews(p.reviews)})</span>` : ''}</div>`
+    : '';
+
+  const price = escHtml(p.price_inr || p.price || 'Check price');
+  const cls   = large ? 'card card-large' : 'card';
+  const safeHref = escAttr(href);
+
+  return `
+<div class="${cls}" onclick="safeOpen('${safeHref}')">
+  <div class="card-img-wrap">${imgHtml}${badge}</div>
+  <div class="card-body">
+    <div class="card-title">${escHtml(p.title || 'Product')}</div>
+    <div class="card-price">${price}</div>
+    ${rating}
+  </div>
+  <a class="card-btn" href="${safeHref}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+      <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/>
+      <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+    </svg>
+    View &amp; Buy
+  </a>
+</div>`;
+}
+
+/* Opens a URL safely even when popup blockers are active */
+window.safeOpen = function(url) {
+  const a = document.createElement('a');
+  a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+};
+
+function detectSource(url) {
+  const map = { 'flipkart.com':'Flipkart','amazon.in':'Amazon.in','amazon.com':'Amazon','myntra.com':'Myntra','ajio.com':'Ajio','croma.com':'Croma','tatacliq':'Tata CLiQ','nykaa':'Nykaa','meesho':'Meesho' };
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    for (const [k, v] of Object.entries(map)) if (host.includes(k)) return v;
+  } catch {}
+  return '';
+}
+
+/* ── Intent bar ──────────────────────────────────────────────────── */
+function showIntent(intent) {
+  if (!intent || intent === 'empty') { hideIntentBar(); return; }
+  const m = INTENT_META[intent];
+  if (!m) { hideIntentBar(); return; }
+  intentIcn.textContent = m.icon;
+  intentTxt.textContent = m.label;
+  intentBar.style.display = 'flex';
+}
+function hideIntentBar() { intentBar.style.display = 'none'; }
+
+/* ── Utilities ───────────────────────────────────────────────────── */
+function scrollToBottom() { requestAnimationFrame(() => { msgBox.scrollTop = msgBox.scrollHeight; }); }
+function makeEl(tag, cls) { const e = document.createElement(tag); e.className = cls; return e; }
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) { return escHtml(s).replace(/'/g,'&#39;'); }
+function fmtReviews(n) { const x = parseInt(n,10); return isNaN(x) ? String(n) : x >= 1000 ? (x/1000).toFixed(1)+'k' : String(x); }
+
+/* ── Markdown → HTML ─────────────────────────────────────────────── */
+function mdToHtml(raw) {
+  const lines = raw.split('\n');
+  const out = [];
+  let inList = false;
+
+  for (const line of lines) {
+    if (/^## (.+)/.test(line)) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push(`<h3>${inlineFmt(line.replace(/^## /,''))}</h3>`); continue;
+    }
+    if (/^### (.+)/.test(line)) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push(`<h4>${inlineFmt(line.replace(/^### /,''))}</h4>`); continue;
+    }
+    if (/^---+$/.test(line.trim())) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push('<hr>'); continue;
+    }
+    if (/^[-•*] (.+)/.test(line)) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${inlineFmt(line.replace(/^[-•*] /,''))}</li>`); continue;
+    }
+    if (inList) { out.push('</ul>'); inList = false; }
+    if (line.trim() === '') { out.push('<br>'); continue; }
+    out.push(`<p>${inlineFmt(line)}</p>`);
+  }
+  if (inList) out.push('</ul>');
+  return out.join('');
+}
+
+function inlineFmt(t) {
+  t = escHtml(t);
+  t = t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/\*(.+?)\*/g,     '<em>$1</em>');
+  t = t.replace(/`([^`]+)`/g,     '<code style="background:#1a1f35;padding:1px 5px;border-radius:4px;font-size:12.5px;color:#93c5fd">$1</code>');
+  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_,label,url) => `<a href="${url.replace(/&amp;/g,'&')}" target="_blank" rel="noopener">${label}</a>`);
+  t = t.replace(/(₹[\d,]+)/g, '<strong>$1</strong>');
+  return t;
+}
+
+/* ── Init ────────────────────────────────────────────────────────── */
+loadChips();
+addGreeting();
+inp.focus();
+</script>
+</body>
+</html>

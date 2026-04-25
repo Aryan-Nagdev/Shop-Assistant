@@ -1,0 +1,9 @@
+flask
+flask-cors
+python-dotenv
+requests
+sentence-transformers
+faiss-cpu
+numpy
+tqdm
+torch
