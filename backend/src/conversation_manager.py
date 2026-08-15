@@ -149,12 +149,81 @@ class ConversationManager:
 
     # Brand switch patterns
     _BRAND_SWITCH_RE = re.compile(
-        r'\b(?:show\s+me|switch\s+to|what\s+about|only|prefer|make\s+it)\s+([a-zA-Z\s\.\-&]+)\s+(?:instead|brand|shoes|phone|laptop)?\b',
+        r'\b(?:switch\s+to|what\s+about|how\s+about|instead|same\s+in|prefer\s+[a-zA-Z\s\.\-&]+(?:\s+instead)?|make\s+it\s+[a-zA-Z\s\.\-&]+\s+instead|show\s+me\s+[a-zA-Z\s\.\-&]+\s+instead)\b',
+        re.I
+    )
+
+    # Reference to previous results / question on previous items
+    _RESULT_REF_RE = re.compile(
+        r'\b(?:which\s+one|between\s+(?:them|these)|of\s+(?:the\s+two|these|them)|'
+        r'first\s+one|second\s+one|third\s+one|more\s+options|show\s+more|any\s+other|'
+        r'better\s+battery|better\s+camera|which\s+(?:is|has)\s+better)\b',
+        re.I
+    )
+
+    # Standalone search intent indicator
+    _STANDALONE_SEARCH_PREFIX = re.compile(
+        r'^\s*(?:find|show\s+me|get\s+me|search|buy|looking\s+for|i\s+need|i\s+want|suggest|recommend|best|top)\b',
         re.I
     )
 
     def __init__(self):
         self.context = ShoppingContext()
+
+    def _is_followup_turn(self, user_msg: str, qu_raw: QueryUnderstanding) -> bool:
+        """
+        Determines whether the user turn is modifying/refining the active product context,
+        or starting a completely new product request.
+        """
+        # 1. Check for explicit removals ("forget i5", "without graphics", "no color")
+        if self._detect_removals(user_msg):
+            return True
+
+        # 2. Check for explicit relative brand switches ("show me dell instead", "what about lenovo", "switch to hp")
+        if self._BRAND_SWITCH_RE.search(user_msg):
+            return True
+
+        # 3. Check for previous result references ("which one is better", "is the first one good for gaming", "show more options")
+        if self._RESULT_REF_RE.search(user_msg):
+            return True
+
+        # 4. Check for category or audio type change
+        if qu_raw.category and self.context.category and qu_raw.category != self.context.category:
+            return False
+        if qu_raw.audio_type and self.context.audio_type and qu_raw.audio_type != self.context.audio_type:
+            return False
+
+        has_search_prefix = bool(self._STANDALONE_SEARCH_PREFIX.search(user_msg))
+
+        # 5. Check if query introduces a brand without relative transition words
+        if qu_raw.brands and qu_raw.brands != self.context.brands:
+            if not self._BRAND_SWITCH_RE.search(user_msg):
+                return False
+
+        # 6. Check if query specifies category + (new brand / use case / search prefix / explicit price)
+        if qu_raw.category:
+            if has_search_prefix or (qu_raw.brands and qu_raw.brands != self.context.brands):
+                return False
+            if qu_raw.use_case or (qu_raw.price.get('max') is not None and len(user_msg.split()) >= 3 and not re.search(r'\b(?:make\s+it|change|increase|reduce)\b', user_msg, re.I)):
+                return False
+
+        # 7. Check for pure budget modifications on the current item ("make it 60k", "under 60k", "budget 50k", "cheaper ones")
+        if self._detect_budget_mod(user_msg) is not None:
+            if not qu_raw.category or qu_raw.category == self.context.category:
+                return True
+
+        # 8. Check for pure spec / color additions on the current item ("only 16GB", "with 16gb ram", "black colour", "in blue")
+        if qu_raw.specifications or qu_raw.color or qu_raw.use_case:
+            words = user_msg.split()
+            if len(words) <= 6 and not has_search_prefix:
+                return True
+
+        # 9. Short phrases without new products
+        words = user_msg.split()
+        if len(words) <= 3 and not qu_raw.category and not qu_raw.brands:
+            return True
+
+        return False
 
     def process_turn(self, raw_user_msg: str) -> tuple[ShoppingContext, QueryUnderstanding, str]:
         """
@@ -185,41 +254,43 @@ class ConversationManager:
             normalized_q = qu_raw.normalized_query if qu_raw.normalized_query else user_msg
             return self.context, qu_raw, normalized_q
 
+        # ── Check for Information / Concept Questions (Never corrupt with previous context) ──
+        is_information = (
+            qu_raw.intent == 'information'
+            or bool(re.search(r'^\s*(?:what\s+is|what\s+are|explain|how\s+does|meaning\s+of|how\s+to|why\s+is)\b', user_msg, re.I))
+        )
+        if is_information:
+            self.context.clear()
+            self.context.last_intent = 'information'
+            self._apply_qu_to_context(qu_raw, user_msg)
+            normalized_q = qu_raw.normalized_query if qu_raw.normalized_query else user_msg
+            return self.context, qu_raw, normalized_q
+
         # If context is empty, initialize directly from current query
         if self.context.is_empty():
             self._apply_qu_to_context(qu_raw, user_msg)
             normalized_q = qu_raw.normalized_query if qu_raw.normalized_query else user_msg
             return self.context, qu_raw, normalized_q
 
-        # ── 1. Check if user is starting a completely new category ────────────
-        if qu_raw.category and self.context.category and qu_raw.category != self.context.category:
-            print(f"[ConversationManager] New category detected: '{qu_raw.category}' (was '{self.context.category}') -> Resetting context")
-            self.context.clear()
-            self._apply_qu_to_context(qu_raw, user_msg)
-            normalized_q = qu_raw.normalized_query if qu_raw.normalized_query else user_msg
-            return self.context, qu_raw, normalized_q
+        # ── Determine if this turn is a Follow-up Refinement vs New Product Request ──
+        is_followup = self._is_followup_turn(user_msg, qu_raw)
 
-        # ── Check if this is a standalone product search / recommendation query ─────
-        # If previous turn was comparison, or query has category with (brand/specs/price/use_case), treat as fresh search
-        is_standalone = bool(
-            (self.context.last_intent == 'comparison' and not re.search(r'\b(?:which\s+one|between\s+(?:them|these)|of\s+(?:the\s+two|these|them))\b', user_msg, re.I))
-            or (qu_raw.category and (qu_raw.brand or qu_raw.specifications or qu_raw.price.get('max') or qu_raw.use_case))
-        )
-        if is_standalone:
+        if not is_followup:
+            print(f"[ConversationManager] New product request detected for: {user_msg!r} -> Resetting context")
             self.context.clear()
             self._apply_qu_to_context(qu_raw, user_msg)
             normalized_q = qu_raw.normalized_query if qu_raw.normalized_query else user_msg
             return self.context, qu_raw, normalized_q
 
         # ── Follow-up Modifications on existing shopping context ───────────────
-        # ── 2. Check for explicit Constraint Removals ("forget i5", "without graphics") ─
+        # 1. Check for explicit Constraint Removals ("forget i5", "without graphics")
         removals = self._detect_removals(user_msg)
         if removals:
             for rem in removals:
                 self._remove_constraint(rem)
             print(f"[ConversationManager] Removed constraints: {removals}")
 
-        # ── 3. Check for Budget Modifications ("make it 60k", "under 60k") ─────
+        # 2. Check for Budget Modifications ("make it 60k", "under 60k")
         new_budget = self._detect_budget_mod(user_msg)
         if new_budget is not None:
             old_b_str = f"₹{self.context.max_price:,}" if self.context.max_price is not None else "None"
@@ -227,7 +298,7 @@ class ConversationManager:
             print(f"[ConversationManager] Budget updated: {old_b_str} -> {new_b_str}")
             self.context.max_price = new_budget
 
-        # ── 4. Check for Brand Switches ("show me dell instead", "what about lenovo") ──
+        # 3. Check for Brand Switches ("show me dell instead", "what about lenovo")
         if qu_raw.brands:
             if len(qu_raw.brands) == 1:
                 print(f"[ConversationManager] Brand updated: '{self.context.brand}' -> '{qu_raw.brands[0]}'")
@@ -237,19 +308,19 @@ class ConversationManager:
                 self.context.brands = list(qu_raw.brands)
                 self.context.brand = None
 
-        # ── 5. Check for Color Updates ("black colour", "only in blue") ───────
+        # 4. Check for Color Updates ("black colour", "only in blue")
         if qu_raw.color:
             print(f"[ConversationManager] Color updated: '{self.context.color}' -> '{qu_raw.color}'")
             self.context.color = qu_raw.color
 
-        # ── 6. Check for Specs Additions ("only 16GB", "with dedicated graphics") ─
+        # 5. Check for Specs Additions ("only 16GB", "with dedicated graphics")
         if qu_raw.specifications:
             for k, v in qu_raw.specifications.items():
                 if k not in removals:
                     print(f"[ConversationManager] Spec updated: {k} -> {v}")
                     self.context.specifications[k] = v
 
-        # ── 7. Check for Use-Case ("for gaming", "for coding") ────────────────
+        # 6. Check for Use-Case ("for gaming", "for coding")
         if qu_raw.use_case:
             self.context.use_case = qu_raw.use_case
 
@@ -300,7 +371,6 @@ class ConversationManager:
         effective_qu.soft_preferences = list(self.context.soft_preferences)
 
         # Build clean effective query string for search API
-        # Rule: Context adds information, but never reduces user query to only brand/category
         effective_query_str = self.context.synthesize_effective_query()
 
         self.context.last_query_raw = user_msg

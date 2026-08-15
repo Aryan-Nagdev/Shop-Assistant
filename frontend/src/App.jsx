@@ -212,6 +212,11 @@ function App() {
   const [voiceTranscript, setVoiceTranscript] = useState('');
   const [speakingMessageId, setSpeakingMessageId] = useState(null);
   const [quickViewProduct, setQuickViewProduct] = useState(null);
+
+  // Intent-aware query suggestions
+  const [querySuggestions, setQuerySuggestions] = useState([]);
+  const [isSuggesting, setIsSuggesting] = useState(false);
+  const suggestDebounceRef = useRef(null);
   
   // Dynamic Loading Step State
   const [loadingStep, setLoadingStep] = useState(0);
@@ -273,6 +278,42 @@ function App() {
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 140)}px`;
     }
   }, [inputMessage]);
+
+  // --- Intent-aware Query Suggestions (debounced) ---
+  useEffect(() => {
+    if (suggestDebounceRef.current) clearTimeout(suggestDebounceRef.current);
+
+    const trimmed = inputMessage.trim();
+    if (trimmed.length < 4) {
+      setQuerySuggestions([]);
+      setIsSuggesting(false);
+      return;
+    }
+
+    setIsSuggesting(true);
+    suggestDebounceRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/refine_query`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: trimmed, language: selectedLanguage }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+          // Filter out suggestions identical to current input
+          setQuerySuggestions(suggestions.filter(s => s.toLowerCase().trim() !== trimmed.toLowerCase()));
+        }
+      } catch (e) {
+        // Silently fail — suggestions are a nice-to-have
+        console.warn('[Suggest] fetch failed:', e);
+      } finally {
+        setIsSuggesting(false);
+      }
+    }, 450);
+
+    return () => clearTimeout(suggestDebounceRef.current);
+  }, [inputMessage, selectedLanguage]);
 
   const activeChat = conversations.find(c => c.id === activeChatId) || conversations[0] || {
     id: 'temp',
@@ -544,6 +585,8 @@ function App() {
 
     setInputMessage('');
     setImagePreview(null);
+    setQuerySuggestions([]);
+    setIsSuggesting(false);
 
     const updatedChat = { ...activeChat };
     updatedChat.messages = [...updatedChat.messages, userMsg];
@@ -577,25 +620,75 @@ function App() {
 
       // 3. Append Assistant Message
       const isComparison = result.intent === 'comparison';
+      const rawProducts = Array.isArray(result.products) ? result.products : [];
+      const hasComparisonProducts = isComparison && rawProducts.length > 0;
+
+      let comparisonData = null;
+      if (hasComparisonProducts) {
+        // Build candidate features and extract values safely
+        const candidateFeatures = [
+          {
+            key: 'price',
+            label: selectedLanguage === 'hi' ? 'कीमत' : 'Price',
+            getValue: (p) => p.price_inr || (p.price ? `₹${p.price.toLocaleString('en-IN')}` : null),
+            hasCheck: (p) => Boolean(p.price_inr || p.price)
+          },
+          {
+            key: 'brand',
+            label: selectedLanguage === 'hi' ? 'ब्रांड' : 'Brand',
+            getValue: (p) => p.brand || null,
+            hasCheck: (p) => Boolean(p.brand)
+          },
+          {
+            key: 'rating',
+            label: selectedLanguage === 'hi' ? 'रेटिंग' : 'Rating',
+            getValue: (p) => p.rating ? `${p.rating} ★` : null,
+            hasCheck: (p) => Boolean(p.rating && parseFloat(p.rating) > 0)
+          },
+          {
+            key: 'source',
+            label: selectedLanguage === 'hi' ? 'स्टोर' : 'Store Link',
+            getValue: (p) => p.source || (p.link ? 'Store' : null),
+            hasCheck: (p) => Boolean(p.source || p.link)
+          }
+        ];
+
+        // Filter so that only features with at least some available information are displayed
+        const activeFeatures = candidateFeatures.filter(feat =>
+          rawProducts.some(p => feat.getValue(p) !== null)
+        );
+
+        if (activeFeatures.length > 0) {
+          const ratings = rawProducts.map(p => parseFloat(p.rating) || 0);
+          const maxRating = Math.max(...ratings);
+          const hasWinner = maxRating >= 4.0;
+
+          comparisonData = {
+            features: activeFeatures.map(f => f.label),
+            products: rawProducts.map(p => {
+              const pRating = parseFloat(p.rating) || 0;
+              return {
+                name: (p.title || 'Product').length > 25 ? `${(p.title || 'Product').substring(0, 25)}...` : (p.title || 'Product'),
+                values: activeFeatures.map(f => f.getValue(p) || 'N/A'),
+                checks: activeFeatures.map(f => f.hasCheck(p)),
+                isWinner: hasWinner && pRating === maxRating
+              };
+            }),
+            verdict: selectedLanguage === 'hi' 
+              ? 'तुलना पूरी हुई। उपलब्ध उत्पाद विवरण ऊपर तालिका में दिखाए गए हैं।'
+              : 'Optimized comparison complete. Available product details shown above.'
+          };
+        }
+      }
+
       const aiMsg = {
         id: `msg-${Date.now()}`,
         role: 'assistant',
         content: result.answer,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        componentType: isComparison ? 'comparison' : (result.products?.length > 0 ? 'grid' : null),
-        products: result.products || [],
-        comparisonData: isComparison ? {
-          features: selectedLanguage === 'hi' ? ['कीमत', 'ब्रांड', 'रेटिंग', 'लिंक'] : ['Price', 'Brand', 'Rating', 'Store Link'],
-          products: (result.products || []).map(p => ({
-            name: (p.title || '').substring(0, 20) + '...',
-            values: [p.price_inr || 'N/A', p.brand || 'N/A', p.rating ? `${p.rating} ★` : 'N/A', p.source || 'N/A'],
-            checks: [true, true, true, true],
-            isWinner: parseFloat(p.rating || 0) >= 4.3
-          })),
-          verdict: selectedLanguage === 'hi' 
-            ? 'तुलना पूरी हुई। सर्वोत्तम रेटिंग वाले उत्पाद को विजेता चुना गया है।'
-            : 'Optimized comparison complete. Winning item highlighted.'
-        } : null
+        componentType: (isComparison && comparisonData) ? 'comparison' : (rawProducts.length > 0 ? 'grid' : null),
+        products: rawProducts,
+        comparisonData: comparisonData
       };
 
       updatedChat.messages = [...updatedChat.messages, aiMsg];
@@ -1138,7 +1231,7 @@ function App() {
                           )}
 
                           {/* ── RICH VIEW 2: COMPARISON TABLE ── */}
-                          {!isUser && msg.componentType === 'comparison' && msg.comparisonData && (
+                          {!isUser && msg.componentType === 'comparison' && msg.comparisonData && Array.isArray(msg.comparisonData.products) && msg.comparisonData.products.length > 0 && (
                             <div className="mt-6 border border-zinc-800/60 rounded-2xl overflow-hidden bg-chatSurface/80 backdrop-blur-md shadow-2xl">
                               <div className="overflow-x-auto">
                                 <table className="w-full text-left border-collapse text-xs">
@@ -1166,13 +1259,13 @@ function App() {
                                         {msg.comparisonData.products.map((p, pIdx) => (
                                           <td key={pIdx} className={`p-4 font-medium ${p.isWinner ? 'bg-indigo-600/5' : ''}`}>
                                             <div className="flex items-center gap-2">
-                                              {p.checks[fIdx] ? (
+                                              {p.checks && p.checks[fIdx] ? (
                                                 <CheckCircle2 size={13} className="text-emerald-400 flex-shrink-0" />
                                               ) : (
                                                 <XCircle size={13} className="text-zinc-500 flex-shrink-0" />
                                               )}
                                               <span className={p.isWinner && feature === 'Value Rating' ? 'text-indigo-400 font-extrabold' : 'text-zinc-200'}>
-                                                {p.values[fIdx]}
+                                                {p.values ? p.values[fIdx] : 'N/A'}
                                               </span>
                                             </div>
                                           </td>
@@ -1183,12 +1276,14 @@ function App() {
                                 </table>
                               </div>
                               
-                              <div className="p-4 bg-black/20 border-t border-zinc-800/40 flex items-start gap-2.5">
-                                <Award size={18} className="text-yellow-500 flex-shrink-0 mt-0.5" />
-                                <p className="text-zinc-400 text-xs italic leading-relaxed">
-                                  {msg.comparisonData.verdict}
-                                </p>
-                              </div>
+                              {msg.comparisonData.verdict && (
+                                <div className="p-4 bg-black/20 border-t border-zinc-800/40 flex items-start gap-2.5">
+                                  <Award size={18} className="text-yellow-500 flex-shrink-0 mt-0.5" />
+                                  <p className="text-zinc-400 text-xs italic leading-relaxed">
+                                    {msg.comparisonData.verdict}
+                                  </p>
+                                </div>
+                              )}
                             </div>
                           )}
 
@@ -1306,7 +1401,41 @@ function App() {
             </div>
 
             {/* Suggestion Chips Below */}
-            {activeChat.messages.length === 0 && (
+            {/* Dynamic AI suggestions when user is typing */}
+            {inputMessage.trim().length >= 4 && (
+              <div className="space-y-2">
+                {isSuggesting && querySuggestions.length === 0 ? (
+                  <div className="flex items-center gap-2 text-zinc-500">
+                    <div className="w-3 h-3 rounded-full border border-indigo-500/60 border-t-transparent animate-spin" />
+                    <span className="text-[11px]">Understanding your intent...</span>
+                  </div>
+                ) : querySuggestions.length > 0 ? (
+                  <>
+                    <div className="flex items-center gap-1.5 text-zinc-500">
+                      <Sparkles size={11} className="text-indigo-400" />
+                      <span className="text-[10px] font-semibold tracking-wider uppercase">Suggestions</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {querySuggestions.map((suggestion, idx) => (
+                        <button
+                          key={idx}
+                          className="flex-shrink-0 px-3 py-1.5 bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-500/30 hover:border-indigo-400/60 text-xs font-medium rounded-full text-indigo-200 hover:text-white transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-sm shadow-sm shadow-indigo-900/20"
+                          onClick={() => {
+                            setQuerySuggestions([]);
+                            handleSendMessage(suggestion);
+                          }}
+                        >
+                          ✦ {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            )}
+
+            {/* Static suggestion chips – shown only on empty chat with no input */}
+            {activeChat.messages.length === 0 && inputMessage.trim().length < 4 && (
               <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none">
                 {currentSuggestions.map((chip, idx) => (
                   <button 

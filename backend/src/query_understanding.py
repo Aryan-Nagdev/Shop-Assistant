@@ -371,7 +371,7 @@ _PRODUCT_CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ('laptop',          re.compile(r'\b(?:laptops?|notebooks?|ultrabooks?|chromebooks?|macbooks?|laptoop|laptopp|labtop)\b', re.I)),
     ('phone',           re.compile(r'\b(?:phones?|mobiles?|smartphones?|iphones?|phon|mobi)\b', re.I)),
     ('smartwatch',      re.compile(r'\b(?:smartwatch(?:es)?|smart\s*watch(?:es)?|fitness\s+band|smart\s*band|wearable)\b', re.I)),
-    ('shoes',           re.compile(r'\b(?:shoes?|sneakers?|footwear|running\s+shoes?|sports\s+shoes?|loafers?|sandals?|snikers)\b', re.I)),
+    ('shoes',           re.compile(r'\b(?:shoes?|sneakers?|footwear|running\s+shoes?|sports\s+shoes?|loafers?|sandals?|snikers|slippers?|boots?|flip\s*flops?|heels?|flats?)\b', re.I)),
     ('t-shirt',         re.compile(r'\b(?:t[\s-]?shirts?|tees?|polo\s+shirts?|tshirt)\b', re.I)),
     ('shirt',           re.compile(r'\b(?:formal\s+shirts?|casual\s+shirts?|(?<!t[\s-])shirts?)\b', re.I)),
     ('jeans',           re.compile(r'\b(?:jeans?|denims?)\b', re.I)),
@@ -382,7 +382,38 @@ _PRODUCT_CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ('washing machine', re.compile(r'\b(?:washing\s+machines?|washers?)\b', re.I)),
     ('air conditioner', re.compile(r'\b(?:air\s*conditioners?|split\s+ac|window\s+ac|\bac\b)\b', re.I)),
     ('television',      re.compile(r'\b(?:televisions?|tvs?|smart\s+tv|led\s+tv)\b', re.I)),
-    ('bag',             re.compile(r'\b(?:bags?|backpacks?)\b', re.I)),
+    ('bag',             re.compile(r'\b(?:bags?|backpacks?|handbags?|trolley|luggage|suitcases?|duffle\s+bags?|wallets?|purses?)\b', re.I)),
+    ('keyboard',        re.compile(r'\b(?:keyboards?|mechanical\s+keyboards?|gaming\s+keyboards?)\b', re.I)),
+    ('mouse',           re.compile(r'\b(?:mouse|mice|gaming\s+mouse|wireless\s+mouse)\b', re.I)),
+    ('monitor',         re.compile(r'\b(?:monitors?|gaming\s+monitors?|screens?|displays?)\b', re.I)),
+    ('printer',         re.compile(r'\b(?:printers?|scanners?|all-in-one\s+printer)\b', re.I)),
+    ('power bank',      re.compile(r'\b(?:power\s*banks?|portable\s+chargers?)\b', re.I)),
+    ('charger',         re.compile(r'\b(?:chargers?|fast\s+charger|adapter|charging\s+cables?|cables?|usb\s*hub)\b', re.I)),
+    ('gaming console',  re.compile(r'\b(?:ps5|ps4|playstation|xbox|nintendo|consoles?|gamepads?|controllers?)\b', re.I)),
+    ('trimmer',         re.compile(r'\b(?:trimmers?|shavers?|groomers?|grooming\s+kits?|hair\s+clippers?)\b', re.I)),
+    ('hair dryer',      re.compile(r'\b(?:hair\s*dryers?|blow\s*dryers?|straighteners?|hair\s*straighteners?|curlers?)\b', re.I)),
+    ('perfume',         re.compile(r'\b(?:perfumes?|fragrances?|colognes?|deodorants?|deos?|attar|body\s*spray|body\s*mist)\b', re.I)),
+    ('skincare',        re.compile(r'\b(?:serums?|face\s*wash|sunscreens?|moisturizers?|creams?|lotions?|cleansers?|face\s*masks?)\b', re.I)),
+    ('microwave',       re.compile(r'\b(?:microwaves?|microwave\s+ovens?|ovens?|otg)\b', re.I)),
+    ('air fryer',       re.compile(r'\b(?:air\s*fryers?|fryers?)\b', re.I)),
+    ('water purifier',  re.compile(r'\b(?:water\s*purifiers?|ro\s+purifiers?|aquaguard)\b', re.I)),
+    ('geyser',          re.compile(r'\b(?:geysers?|water\s*heaters?)\b', re.I)),
+    ('mixer grinder',   re.compile(r'\b(?:mixer\s*grinders?|blenders?|juicers?|food\s*processors?|grinders?)\b', re.I)),
+    ('induction',       re.compile(r'\b(?:inductions?|induction\s*cooktops?|cooktops?|electric\s*kettles?|kettles?)\b', re.I)),
+    ('vacuum cleaner',  re.compile(r'\b(?:vacuum\s*cleaners?|robotic\s*vacuums?)\b', re.I)),
+    ('fan',             re.compile(r'\b(?:ceiling\s*fans?|table\s*fans?|pedestal\s*fans?|exhaust\s*fans?|air\s*coolers?|coolers?)\b', re.I)),
+    ('air purifier',    re.compile(r'\b(?:air\s*purifiers?|purifiers?)\b', re.I)),
+    ('iron',            re.compile(r'\b(?:steam\s*irons?|dry\s*irons?|irons?|garment\s*steamers?)\b', re.I)),
+    ('hoodie',          re.compile(r'\b(?:hoodies?|sweatshirts?|sweaters?|pullovers?|cardigans?)\b', re.I)),
+    ('jacket',          re.compile(r'\b(?:jackets?|coats?|blazers?|windcheaters?|bomber\s*jackets?)\b', re.I)),
+    ('kurta',           re.compile(r'\b(?:kurtas?|kurtis?|kurti\s*sets?|sherwanis?|ethnic\s*wear)\b', re.I)),
+    ('saree',           re.compile(r'\b(?:sarees?|saris?|lehengas?|blouses?|anarkalis?)\b', re.I)),
+    ('dress',           re.compile(r'\b(?:dresses?|gowns?|frocks?|jumpsuits?|skirts?)\b', re.I)),
+    ('trouser',         re.compile(r'\b(?:trousers?|pants?|chinos?|cargos?|cargo\s*pants?|track\s*pants?|joggers?|shorts?)\b', re.I)),
+    ('sunglasses',      re.compile(r'\b(?:sunglasses|shades|goggles|eyewear|spectacles|glasses)\b', re.I)),
+    ('smart bulb',      re.compile(r'\b(?:smart\s*bulbs?|led\s*bulbs?|strip\s*lights?|smart\s*plugs?|lights?|lamps?)\b', re.I)),
+    ('furniture',       re.compile(r'\b(?:office\s*chairs?|gaming\s*chairs?|study\s*tables?|desks?|chairs?|tables?|mattress(?:es)?|pillows?|sofas?|bean\s*bags?)\b', re.I)),
+    ('fitness',         re.compile(r'\b(?:yoga\s*mats?|dumbbells?|treadmills?|exercise\s*cycles?|resistance\s*bands?|cycles?|bicycles?|protein|creatine)\b', re.I)),
 ]
 
 # Canonical category vocabulary for typo matching
@@ -390,7 +421,11 @@ _CATEGORY_VOCAB: list[str] = [
     "laptop", "phone", "earbuds", "earphones", "headphones", "neckband",
     "speaker", "smartwatch", "shoes", "t-shirt", "shirt", "jeans", "watch",
     "tablet", "camera", "refrigerator", "washing machine", "air conditioner",
-    "television", "bag"
+    "television", "bag", "keyboard", "mouse", "monitor", "printer", "power bank",
+    "charger", "gaming console", "trimmer", "hair dryer", "perfume", "skincare",
+    "microwave", "air fryer", "water purifier", "geyser", "mixer grinder", "induction",
+    "vacuum cleaner", "fan", "air purifier", "iron", "hoodie", "jacket", "kurta",
+    "saree", "dress", "trouser", "sunglasses", "smart bulb", "furniture", "fitness"
 ]
 _CATEGORY_VOCAB_SET: set[str] = set(_CATEGORY_VOCAB)
 
@@ -840,7 +875,9 @@ _PRODUCT_BRAND_RE = re.compile(
     r'\b(?:phone|laptop|mobile|earbuds?|earphones?|headphones?|tablet|camera|'
     r'watch|tv|shirt|jeans|shoes?|speaker|smartwatch|refrigerator|ac|cooler|'
     r'cooker|bag|sneakers?|headset|neckband|monitor|keyboard|mouse|printer|'
-    r'router|charger|powerbank|dslr|mirrorless|'
+    r'router|charger|powerbank|dslr|mirrorless|perfume|fragrance|trimmer|'
+    r'dryer|straightener|hoodie|jacket|kurta|saree|dress|trouser|sunglasses|'
+    r'microwave|fryer|purifier|geyser|grinder|induction|kettle|vacuum|iron|'
     r'nike|adidas|samsung|apple|oneplus|realme|vivo|oppo|sony|jbl|boat|bose|'
     r'hp|dell|lenovo|asus|acer|msi|lg|xiaomi|motorola|google|nothing)\b',
     re.I,
@@ -1022,6 +1059,51 @@ class QueryUnderstanding:
                 f"price={self.price} conf={self.overall_confidence:.2f} clarify={self.needs_clarification}>")
 
 
+def _is_pure_gibberish(text: str) -> bool:
+    """
+    Detect strings that are pure keyboard smash, random consonants, or repetitive patterns.
+    Examples: 'asdfghjkl', 'qwertyuiop', 'zxcvbnm', 'dfghjk', 'zzzzzz', '12384729184'
+    """
+    words = [re.sub(r'[^a-zA-Z0-9]', '', w).lower() for w in text.split() if w.strip()]
+    if not words:
+        return True
+
+    # If all tokens are numbers/symbols only
+    if all(w.isdigit() or not w for w in words):
+        return True
+
+    # Check if all individual words are gibberish
+    gibberish_count = 0
+    smash_patterns = [
+        r'asdf', r'dfgh', r'ghjk', r'hjkl',
+        r'qwerty', r'werty', r'ertyu', r'rtyui', r'tyuio', r'yuiop',
+        r'zxcv', r'xcvb', r'cvbn', r'vbnm',
+    ]
+
+    for w in words:
+        if not w or w.isdigit():
+            continue
+        # 4+ chars with almost all identical characters: "aaaa", "zzzz"
+        if len(w) >= 4 and len(set(w)) <= 2:
+            gibberish_count += 1
+            continue
+        # 4+ chars with 0 vowels
+        if len(w) >= 4 and not re.search(r'[aeiouy]', w):
+            gibberish_count += 1
+            continue
+        # 4+ consecutive consonants in this single word
+        if re.search(r'[^aeiouy]{4,}', w):
+            gibberish_count += 1
+            continue
+        # Keyboard smash patterns in this single word
+        if any(re.search(sp, w) for sp in smash_patterns):
+            gibberish_count += 1
+            continue
+
+    word_count = len([w for w in words if w and not w.isdigit()])
+    return word_count > 0 and gibberish_count == word_count
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 9. MAIN UNDERSTANDING PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1148,7 +1230,6 @@ def understand(query: str) -> QueryUnderstanding:
 
     # ── Step 11: Meaningful Keywords Extraction ───────────────────────────────
     kw_text = qu.normalized_query.lower()
-    # Strip known entities from keywords
     remove_patterns = [
         r'\b(?:under|below|less\s+than|upto?|up\s+to|within|max(?:imum)?|budget\s+of?|around)\s*[₹₨$rs\.]*\s*\d[\d,]*\s*(?:k\b|thousand\b)?',
         r'\b\d[\d,]*\s*(?:k\b|thousand\b)?\b',
@@ -1167,8 +1248,12 @@ def understand(query: str) -> QueryUnderstanding:
     kw_text = re.sub(r'\s+', ' ', kw_text).strip()
     qu.keywords = [w for w in kw_text.split() if len(w) > 2]
 
-    # ── Step 12: Overall Confidence Calculation ───────────────────────────────
-    # Confidence is grounded in actual entity detection quality:
+    # ── Step 12: Deterministic intent pre-classification ──────────────────────
+    intent_hint, search_hint = _detect_intent_signals(raw_query, detected_brands=qu.brands)
+    qu.intent = intent_hint
+    qu.search_required = search_hint
+
+    # ── Step 13: Meaningful Tokens & Overall Confidence Calculation ───────────
     conf = 0.0
     if qu.category:
         conf += 0.45 * qu.category_confidence
@@ -1182,36 +1267,52 @@ def understand(query: str) -> QueryUnderstanding:
         conf += 0.10 * qu.color_confidence
     if qu.use_case:
         conf += 0.05
+    if intent_hint in ('information', 'comparison', 'recommendation', 'product_search'):
+        conf += 0.20
 
-    # Check for gibberish / total absence of valid tokens
+    # Extract meaningful tokens (non-stopwords)
     meaningful_tokens = [
         w for w in qu.normalized_query.split()
         if len(w) >= 3 and w.lower() not in (
-            'the', 'for', 'and', 'with', 'get', 'best', 'top', 'good', 'new', 'any', 'are', 'show', 'suggest', 'recommend', 'what', 'should', 'buy'
+            'the', 'for', 'and', 'with', 'get', 'best', 'top', 'good', 'new', 'any', 'are',
+            'show', 'suggest', 'recommend', 'what', 'should', 'buy', 'want', 'need', 'give',
+            'tell', 'find', 'which', 'some', 'please', 'from', 'into', 'under', 'over', 'between',
+            'about', 'have', 'does', 'item', 'items', 'options', 'looking', 'india', 'price',
+            'chahiye', 'batao', 'dikhao', 'kuch', 'accha', 'achha', 'hota', 'kya', 'hai', 'hain'
         )
     ]
+    if meaningful_tokens and conf < 0.20:
+        conf += min(0.30, 0.15 * len(meaningful_tokens))
 
-    # Normalize overall confidence
     qu.overall_confidence = round(min(1.0, conf), 2)
 
-    # ── Step 13: Clarification Decision ───────────────────────────────────────
-    # Clarify ONLY if query cannot be identified as any valid product or shopping intent
-    if (qu.category is None
-            and not qu.brands
-            and not qu.specifications
-            and qu.overall_confidence < 0.25):
+    # ── Step 14: Clarification Decision ───────────────────────────────────────
+    # Clarify ONLY if query cannot be identified as any valid product, intent, or meaningful request
+    is_gibberish = _is_pure_gibberish(raw_query)
+    words = qu.normalized_query.lower().split()
+    is_vague_single_word = (len(words) == 1 and words[0] in (
+        'buy', 'product', 'something', 'anything', 'show', 'item', 'items', 'find', 'shop', 'shopping', 'hi', 'hello', 'hey'
+    ))
+
+    has_valid_request = bool(
+        qu.category
+        or qu.brands
+        or qu.specifications
+        or qu.price.get("max") is not None
+        or qu.price.get("min") is not None
+        or qu.color
+        or qu.use_case
+        or (intent_hint in ('information', 'comparison', 'recommendation', 'product_search'))
+        or (len(meaningful_tokens) >= 1 and not is_gibberish and not is_vague_single_word)
+    )
+
+    if not has_valid_request or is_gibberish or is_vague_single_word:
         qu.needs_clarification = True
         qu.clarification_msg = (
             "What type of product are you looking for? For example: laptop, phone, earbuds, shoes, t-shirt, or something else?"
         )
 
-    # ── Step 14: Deterministic intent pre-classification ──────────────────────
-    # Provides a baseline hint used by chatbot.py when resolving final intent.
-    # chatbot.py will override these with LLM intent when conf >= 0.65.
-    intent_hint, search_hint = _detect_intent_signals(raw_query, detected_brands=qu.brands)
-    qu.intent = intent_hint
-    qu.search_required = search_hint
-    print(f"[QU] intent_hint={intent_hint!r} search_required_hint={search_hint}")
+    print(f"[QU] intent_hint={intent_hint!r} search_required_hint={search_hint} clarify={qu.needs_clarification}")
 
     return qu
 

@@ -175,5 +175,33 @@ def suggestions():
         {"text": "Waterproof smartwatch under ₹5000",      "icon": "⌚"},
     ])
 
+
+@app.route('/api/refine_query', methods=['POST'])
+def refine_query():
+    """
+    Intent-aware query suggestion endpoint.
+    Accepts: {"query": "<raw user text>", "language": "en"}
+    Returns: {"suggestions": ["...", "...", "...", "..."]}
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        raw_query = (data.get('query') or '').strip()
+        language  = data.get('language', 'en')
+
+        if not raw_query or len(raw_query) < 3:
+            return jsonify({'suggestions': []})
+
+        from src.query_suggest import get_query_suggestions
+        suggestions_list = get_query_suggestions(raw_query, language=language)
+        return jsonify({'suggestions': suggestions_list})
+
+    except Exception as e:
+        import traceback
+        print("REFINE QUERY ERROR:", repr(e))
+        traceback.print_exc()
+        return jsonify({'suggestions': []}), 200  # Always 200 — UI degrades gracefully
+
+
+
 if __name__ == '__main__':
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)

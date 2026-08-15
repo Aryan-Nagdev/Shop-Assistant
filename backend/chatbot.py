@@ -80,27 +80,42 @@ class ShopBot:
         search_query_seed = effective_q
 
         # ── Clarification gate ─────────────────────────────────────────────────
+        llm = None
         if qu.needs_clarification and context.is_empty():
-            print(f"[Bot] Query too vague — returning clarification.")
-            clar_msg = qu.clarification_msg
-            if effective_lang == 'hi':
-                clar_msg = "कृपया थोड़ा और विवरण दें (जैसे कि आपका बजट, ब्रांड या उत्पाद प्रकार), ताकि मैं आपके लिए सबसे अच्छे उत्पाद खोज सकूँ।"
-            elif effective_lang == 'hinglish':
-                clar_msg = "Please thoda aur detail batayein (jaise aapka budget, brand ya product type) taaki main best options dhundh sakun."
-            
-            self._push('user',      user_msg, 'clarification', {})
-            self._push('assistant', clar_msg, 'clarification', {})
-            return {
-                'answer':           clar_msg,
-                'intent':           'clarification',
-                'search_required':  False,
-                'entities':         {},
-                'products':         [],
-                'language':         effective_lang,
-            }
+            llm_check = llm_reason(effective_q, language=effective_lang)
+            llm_intent = llm_check.get('canonical_intent') or llm_check.get('intent')
+            llm_conf = llm_check.get('confidence', 0.0)
+            llm_has_items = bool(llm_check.get('items')) or bool(llm_check.get('search_queries'))
+            llm_expl = llm_check.get('explanation', '')
+
+            # If LLM understands the query as a valid shopping or information intent, recover it
+            if (llm_intent in ('information', 'comparison', 'recommendation', 'product_search', 'multi_item')
+                    and (llm_conf >= 0.55 or llm_has_items or (llm_intent == 'information' and len(llm_expl) > 25))):
+                print(f"[Bot] LLM recovered vague QU clarification into valid intent={llm_intent!r} (conf={llm_conf:.2f})")
+                qu.needs_clarification = False
+                llm = llm_check
+            else:
+                print(f"[Bot] Query genuinely unresolvable / vague — returning clarification fallback.")
+                clar_msg = qu.clarification_msg or "What type of product are you looking for? For example: laptop, phone, earbuds, shoes, t-shirt, or something else?"
+                if effective_lang == 'hi':
+                    clar_msg = "कृपया थोड़ा और विवरण दें (जैसे कि आपका बजट, ब्रांड या उत्पाद प्रकार), ताकि मैं आपके लिए सबसे अच्छे उत्पाद खोज सकूँ।"
+                elif effective_lang == 'hinglish':
+                    clar_msg = "Please thoda aur detail batayein (jaise aapka budget, brand ya product type) taaki main best options dhundh sakun."
+                
+                self._push('user',      user_msg, 'clarification', {})
+                self._push('assistant', clar_msg, 'clarification', {})
+                return {
+                    'answer':           clar_msg,
+                    'intent':           'clarification',
+                    'search_required':  False,
+                    'entities':         {},
+                    'products':         [],
+                    'language':         effective_lang,
+                }
 
         # ── STEP 0b: LLM reasoning ──────────────────────────────────────────
-        llm = llm_reason(effective_q, language=effective_lang)
+        if llm is None:
+            llm = llm_reason(effective_q, language=effective_lang)
         explanation = llm.get('explanation', '')
 
         # ── STEP 1: NLU ──────────────────────────────────────────────────────
