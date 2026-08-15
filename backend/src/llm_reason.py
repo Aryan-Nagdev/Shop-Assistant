@@ -196,13 +196,13 @@ def llm_reason(query: str, language: str = 'en') -> dict:
 
         client = _get_client()
         resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": effective_system},
                 {"role": "user",   "content": query.strip()},
             ],
             temperature=0.1,
-            max_tokens=800,
+            max_tokens=600,
             timeout=2.5,
         )
         raw = resp.choices[0].message.content.strip()

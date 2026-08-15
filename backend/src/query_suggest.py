@@ -10,6 +10,7 @@ this module:
 Fallback: If Groq is unavailable, generates rule-based suggestions from structured slots.
 """
 import os, sys, json, re, time
+from functools import lru_cache
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -128,6 +129,8 @@ def _rule_based_suggestions(raw_query: str, qu) -> list[str]:
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 
+_suggestion_cache: dict[tuple, list[str]] = {}  # simple in-process cache
+
 def get_query_suggestions(raw_query: str, language: str = "en") -> list[str]:
     """
     Returns 3-4 intent-aware shopping query suggestions for the given raw user input.
@@ -141,6 +144,16 @@ def get_query_suggestions(raw_query: str, language: str = "en") -> list[str]:
     """
     if not raw_query or len(raw_query.strip()) < 3:
         return []
+
+    # Cache lookup (normalise key)
+    cache_key = (raw_query.strip().lower(), language)
+    if cache_key in _suggestion_cache:
+        print(f"[Suggest] Cache hit for {raw_query!r}")
+        return _suggestion_cache[cache_key]
+
+    # Evict oldest entry if cache is large
+    if len(_suggestion_cache) >= 256:
+        _suggestion_cache.pop(next(iter(_suggestion_cache)))
 
     # Step 1: Deterministic query understanding for structured context
     try:
@@ -188,7 +201,7 @@ def get_query_suggestions(raw_query: str, language: str = "en") -> list[str]:
                 {"role": "user",   "content": user_prompt},
             ],
             temperature=0.4,
-            max_tokens=300,
+            max_tokens=200,
         )
         elapsed = time.time() - t0
         raw_resp = resp.choices[0].message.content.strip()
@@ -204,18 +217,24 @@ def get_query_suggestions(raw_query: str, language: str = "en") -> list[str]:
             # Validate: each entry must be a non-empty string
             suggestions = [str(s).strip() for s in suggestions if isinstance(s, str) and s.strip()]
             if suggestions:
-                return suggestions[:4]
+                result = suggestions[:4]
+                _suggestion_cache[cache_key] = result
+                return result
 
     except Exception as e:
         print(f"[Suggest] LLM call failed: {e}")
 
     # Step 4: Fallback to rule-based
     if qu:
-        return _rule_based_suggestions(raw_query, qu)
+        result = _rule_based_suggestions(raw_query, qu)
+        _suggestion_cache[cache_key] = result
+        return result
 
     # Last resort: simple rewording
-    return [
+    result = [
         f"Show me {raw_query}",
         f"Suggest the best {raw_query}",
         f"Find good {raw_query}",
     ]
+    _suggestion_cache[cache_key] = result
+    return result

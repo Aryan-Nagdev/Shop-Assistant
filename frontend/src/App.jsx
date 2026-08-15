@@ -310,7 +310,7 @@ function App() {
       } finally {
         setIsSuggesting(false);
       }
-    }, 450);
+    }, 650);
 
     return () => clearTimeout(suggestDebounceRef.current);
   }, [inputMessage, selectedLanguage]);
