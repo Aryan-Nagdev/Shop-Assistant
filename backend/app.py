@@ -203,5 +203,45 @@ def refine_query():
 
 
 
+@app.route('/api/materials', methods=['POST'])
+def materials():
+    """
+    Material Intelligence endpoint.
+    Accepts: { "product_title": "...", "category": "...", "brand": "...", "description": "..." }
+    Returns: { "materials": [...], "product_title": "..." }
+    """
+    try:
+        data          = request.get_json(force=True) or {}
+        product_title = (data.get('product_title') or '').strip()
+        category      = (data.get('category') or '').strip() or None
+        brand         = (data.get('brand') or '').strip() or None
+        description   = (data.get('description') or '').strip() or None
+
+        if not product_title:
+            return jsonify({'error': 'product_title is required'}), 400
+
+        from src.material_analyzer import get_materials
+        material_list = get_materials(
+            title=product_title,
+            category=category,
+            brand=brand,
+            description=description,
+        )
+
+        return jsonify({
+            'product_title': product_title,
+            'materials':     material_list,
+        })
+
+    except Exception as e:
+        import traceback
+        print("MATERIALS ERROR:", repr(e))
+        traceback.print_exc()
+        return jsonify({
+            'error':     str(e),
+            'materials': [],
+        }), 500
+
+
 if __name__ == '__main__':
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)

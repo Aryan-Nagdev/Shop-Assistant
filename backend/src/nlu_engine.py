@@ -58,7 +58,7 @@ TYPO_CORRECTIONS = [
     (r'\b(?:prcessor|procssor|procosor|procesor)\b', 'processor'),
     (r'\b(?:camra|camer|camrea|camear)\b', 'camera'),
     (r'\b(?:gamng|gammig|gamin)\b', 'gaming'),
-    (r'\b(?:tshirt|t\s*shirt|tee|tees)\b', 't-shirt'),
+    (r'\b(?:tshirts?|t\s*shirts?|tees?|tshir|t-shir)\b', 't-shirt'),
     (r'\b(?:snikers|sneaker|snickers)\b', 'sneakers'),
     (r'\b(?:smart\s*watch|smart-watch)\b', 'smartwatch'),
     (r'\b(?:laptap|lap\s*top|laptoop|laptopp|labtop)\b', 'laptop'),
@@ -66,6 +66,23 @@ TYPO_CORRECTIONS = [
     (r'\b(?:wirless|wirelss|wirelees|wirelass)\b', 'wireless'),
     (r'\b(?:bluethooth|bluetoth|bluethoth|blutooth|bluetooh)\b', 'bluetooth'),
     (r'\b(?:speker|speakr|speakar|speekar)\b', 'speaker'),
+
+    # Apparel, fabric & fashion typos
+    (r'\b(?:waer|ware|wearr)\b', 'wear'),
+    (r'\b(?:cooton|coton|cotten|cottons?)\b', 'cotton'),
+    (r'\b(?:mens)\b', "men's"),
+    (r'\b(?:womens|womans|wemens)\b', "women's"),
+    (r'\b(?:cloths|clothng)\b', 'clothing'),
+    (r'\b(?:shoose|shoos|sheos)\b', 'shoes'),
+    (r'\b(?:pant|pents)\b', 'pants'),
+    (r'\b(?:trouser)\b', 'trousers'),
+    (r'\b(?:jeens|jens)\b', 'jeans'),
+
+    # Truncated shirt/t-shirt variants (shir, shirs → shirt/shirts)
+    (r'\bshirs\b', 'shirts'),
+    (r'\bshir\b', 'shirt'),
+    (r'\btshir\b', 't-shirt'),
+    (r'\bt-shir\b', 't-shirt'),
 ]
 
 def normalize_spelling(q: str) -> str:
@@ -154,6 +171,8 @@ CATEGORY_MAP = [
      'Electronics', 'Televisions', 'televisions'),
     (['camera', 'dslr', 'mirrorless', 'gopro', 'action camera', 'webcam'],
      'Electronics', 'Cameras', 'cameras'),
+    (['office wear', 'work wear', 'formal wear', 'corporate wear', 'formal attire', 'office attire', 'formal clothes'],
+     'Clothing_Shoes_and_Jewelry', 'Office Wear', 'formal-wear'),
     (['t-shirt', 'tshirt', 'polo shirt', 't shirt'],
      'Clothing_Shoes_and_Jewelry', 'T-Shirts', 't-shirts'),
     (['shirt', 'formal shirt', 'casual shirt'],
@@ -282,10 +301,10 @@ FASHION_OCCASIONS = [
 # ── Vague-query → concrete logic ───────────────────────────────────────────────
 # Each entry maps a signal word to search-relevant expansions + NLU hints
 VAGUE_SIGNALS = {
-    'cheap':           {'price_tier': 'budget', 'vague_hint': 'budget affordable value for money'},
-    'affordable':      {'price_tier': 'budget', 'vague_hint': 'budget affordable'},
-    'budget':          {'price_tier': 'budget', 'vague_hint': 'budget value for money'},
-    'inexpensive':     {'price_tier': 'budget', 'vague_hint': 'affordable low cost'},
+    'cheap':           {'price_tier': 'budget', 'vague_hint': ''},
+    'affordable':      {'price_tier': 'budget', 'vague_hint': ''},
+    'budget':          {'price_tier': 'budget', 'vague_hint': ''},
+    'inexpensive':     {'price_tier': 'budget', 'vague_hint': ''},
     'premium':         {'price_tier': 'premium', 'vague_hint': 'premium high rated flagship'},
     'flagship':        {'price_tier': 'premium', 'vague_hint': 'flagship premium top of the line'},
     'luxury':          {'price_tier': 'premium', 'vague_hint': 'luxury premium exclusive'},
@@ -404,10 +423,24 @@ def detect_intent(query: str) -> str:
     if re.search(r'\bsuggest\b.+\b(?:jeans|shirt|kurta|shoes|jacket|top)\b.+\bfor\b', q):
         return 'pairing'
 
-    # 3. Single best — "suggest/recommend 1" OR "one best X"
+    # 3. Single best — explicit request for one specific best choice
+    # Examples: "give me the best laptop under 60k", "which one should I buy", "recommend one laptop"
     if re.search(
-        r'(?:suggest|recommend|give me|show me|find me)\s+(?:me\s+)?(?:1|one)\b'
-        r'|(?:1|one)\s+best\b|best\s+(?:1|one)\b', q):
+        r'\b(?:1|one)\s+(?:best|top|option|product|choice|recommendation|pick)\b'
+        r'|\b(?:suggest|recommend|give|show|find|pick)\s+(?:me\s+)?(?:just\s+|only\s+)?(?:1|one)\b'
+        r'|\b(?:only|just)\s+(?:1|one)\b'
+        r'|\brecommend\s+(?:me\s+)?(?:1|one)\b'
+        r'|\b(?:give\s+me|find\s+me|show\s+me|tell\s+me|what\s+is|what\'s)\s+(?:the\s+)?(?:single\s+best|absolute\s+best|#1|number\s+one)\b'
+        r'|\b(?:give\s+me|what\s+is|what\'s)\s+the\s+best\s+(?:\w+\s+)?(?:under|below|for|in)?\b'
+        r'|\bthe\s+(?:single\s+best|only\s+one|best\s+one)\b'
+        r'|\bwhich\s+one\s+(?:should\s+i|to|shall\s+i)?\s*(?:buy|choose|pick|get)\b'
+        r'|\bwhich\s+one\s+(?:is\s+best|is\s+better|do\s+you\s+recommend)\b'
+        r'|\bpick\s+(?:the\s+best\s+one|one)\s+for\s+me\b'
+        r'|\bwhich\s+is\s+the\s+best\s+one\b'
+        r'|\b(?:ek\s+hi|ek\s+best|sirf\s+ek|kaunsa\s+ek)\b',
+        q,
+        re.I
+    ):
         return 'single_best'
 
     # 4. Price filter
@@ -481,8 +514,15 @@ def extract_entities(query: str) -> dict:
         'price_tier':       None,
         'min_price_tier':   None,
         'vague_hint':       '',     # ← extra search terms from vague signals
+        'wants_lowest_price': False,
         'multi_items':      [],
     }
+
+    ents['wants_lowest_price'] = bool(re.search(
+        r'\b(?:cheapest|lowest\s*(?:price|cost)?|least\s*expensive|most\s*affordable|'
+        r'cheaper|sasta|saste|kam\s*daam|kam\s*keemat)\b',
+        q, re.I
+    ))
 
     # ── Audio type — MUST be detected before category (prevents mixing) ─────────
     ents['audio_type'] = _detect_audio_type(q)
@@ -688,9 +728,9 @@ def _india(s: str) -> str:
 def _tech_token(tech: dict) -> str:
     """Build a concise tech spec string for search queries."""
     parts = []
-    for spec in ('processor', 'ram', 'storage', 'gpu', 'display', 'camera', 'battery'):
+    for spec in ('cpu', 'processor', 'ram', 'storage', 'gpu', 'display', 'camera', 'battery', 'material'):
         val = tech.get(spec)
-        if val:
+        if val and val not in parts:
             parts.append(val)
     return ' '.join(parts)
 
@@ -723,6 +763,9 @@ def _extract_product_name(q: str, ents: dict) -> str:
     # Remove tech spec tokens from product term to prevent duplication
     p = re.sub(r'\b(?:i[3579]|ryzen\s*[3579]?|core\s*ultra|intel|amd|nvidia|rtx\s*\d*|gtx\s*\d*|processor|cpu|ram|\d+\s*gb|\d+\s*tb|ssd|hdd|storage|graphics?\s*cards?|dedicated\s*graphics?|dedicated\s*gpu|gpu|graphics?|anc)\b', '', p, flags=re.I)
 
+    # Remove prepositions, conjunctions, and fillers
+    p = re.sub(r'\b(?:with|having|using|plus|for|in|of|and)\b', ' ', p, flags=re.I)
+
     # Remove vague signal words
     for signal in VAGUE_SIGNALS:
         p = re.sub(r'\b' + re.escape(signal) + r'\b', '', p)
@@ -730,6 +773,9 @@ def _extract_product_name(q: str, ents: dict) -> str:
     # Remove general fillers and introductory words
     p = re.sub(r'\b(?:best|top|latest|suggest|recommend|show|find|get|me|i\s+want|i\s+need|looking\s+for|please|pls|india)\b', '', p)
     
+    # Remove gender phrases from product term since gender token is added separately
+    p = re.sub(r'\b(?:for\s+)?(?:men\'?s?|women\'?s?|male|female|boys?|girls?|ladies?|kids?)\b', '', p)
+
     # Clean whitespace
     p = re.sub(r'\s+', ' ', p).strip()
     
@@ -830,27 +876,53 @@ def build_search_queries(query: str, intent: str, ents: dict) -> list[dict]:
 
     # ── All other intents ──────────────────────────────────────────────────────
     brand_s = brands[0] if brands else ''
+    mat_s = ' '.join(ents.get('materials') or [])
+    use_case = ents.get('use_case') or ''
+    if use_case == 'study':
+        vague_s = (vague_s + ' college casual wear').strip()
+    elif use_case == 'gym' and 'running' not in (product_term or '').lower():
+        vague_s = (vague_s + ' running').strip()
+    elif use_case == 'office' and 'office' not in (product_term or '').lower():
+        vague_s = (vague_s + ' office formal').strip()
 
-    # Add variation to avoid identical results on repeated queries
-    variation = random.choice(_VARIATION_SUFFIXES) if not brands else ''
+    # Avoid duplicating style if product_term already contains it
+    if style_s and product_term and style_s.lower() in product_term.lower().split():
+        style_s = ''
+
+    # Keep the shopping query clean — random suffixes caused empty Google Shopping hits
+    variation = ''
 
     base = _build_tokens(
         brand_s,
-        tech_s,
-        color_s, gender, style_s,
         product_term or q,
-        vague_s,          # ← vague expansion terms injected here
+        tech_s,
+        mat_s,
+        color_s, gender, style_s,
+        vague_s,
         price_s,
         variation,
     )
-    return [{'label': 'Results', 'query': _india(base)}]
+    # Deduplicate consecutive repeated words
+    words = []
+    for w in base.split():
+        if not words or w.lower() != words[-1].lower():
+            words.append(w)
+    base = ' '.join(words)
+
+    # Only append India if query is short and doesn't already specify country/region
+    if len(base.split()) <= 3 and 'india' not in base.lower():
+        q_str = _india(base)
+    else:
+        q_str = base
+    return [{'label': 'Results', 'query': q_str}]
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 def analyse(query: str) -> dict:
-    intent  = detect_intent(query)
-    ents    = extract_entities(query)
-    queries = build_search_queries(query, intent, ents)
+    q_norm  = normalize_spelling(query)
+    intent  = detect_intent(q_norm)
+    ents    = extract_entities(q_norm)
+    queries = build_search_queries(q_norm, intent, ents)
     return {
         'intent':   intent,
         'entities': ents,

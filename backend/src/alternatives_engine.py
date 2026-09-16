@@ -71,23 +71,33 @@ def find_smart_alternatives(
             if v_no_price.valid and p.price_num and p.price_num > max_price:
                 price_exceeded_candidates.append(p)
 
-        # If none in initial candidates (e.g. search query had 'under 30000' which filtered all 40k items),
+        # If none in initial candidates (e.g. search query had 'under 50000' which filtered all matching items),
         # fetch unconstrained candidate items for the category & specs
         if not price_exceeded_candidates:
             spec_str = ' '.join(tech_specs.values())
             brand_str = ' '.join(brands)
             cat_str = audio_type or category or 'product'
             color_str = ' '.join(colors)
-            unconstrained_q = f"{brand_str} {color_str} {spec_str} {cat_str} best price India".strip()
+            unconstrained_q = f"{brand_str} {color_str} {spec_str} {cat_str} India".strip()
             unconstrained_q = re.sub(r'\s+', ' ', unconstrained_q)
 
             raw_unconstrained = _serpapi(unconstrained_q, num=16)
             if not raw_unconstrained:
                 raw_unconstrained = _scrapingdog(unconstrained_q, num=16)
-
             norm_unconstrained = [normalize_raw_item(it, unconstrained_q) for it in raw_unconstrained]
 
+            # If search APIs returned nothing, use Groq / static catalog fallback without budget restriction
+            if not norm_unconstrained:
+                from src.live_search import _groq_product_fallback
+                ents_unconstrained = dict(ents)
+                ents_unconstrained['max_price'] = None
+                ents_unconstrained['hard_requirements'] = [hr for hr in hard_reqs if not hr.startswith('price <=')]
+                fb_items = _groq_product_fallback(unconstrained_q, ents_unconstrained, count=top_n)
+                norm_unconstrained = [normalize_raw_item(it, unconstrained_q) for it in fb_items]
+
             for p in norm_unconstrained:
+                if p.is_accessory:
+                    continue
                 v_no_price = validate_product(
                     prod=p,
                     target_category=category,
@@ -109,23 +119,31 @@ def find_smart_alternatives(
             best_p = price_exceeded_candidates[0]
             diff = (best_p.price_num or 0) - max_price
 
-            d = best_p.to_dict()
-            d['is_alternative'] = True
-            d['alternative_type'] = 'budget_relaxed'
-            d['alternative_diff'] = f"+₹{diff:,.0f} above budget"
-            d['alternative_explanation'] = f"Matches your requested configuration but is ₹{diff:,.0f} above your ₹{max_price:,} budget."
-            
-            lowest_spec_match = d
-            alternatives.append(d)
+            for p in price_exceeded_candidates[:top_n]:
+                p_diff = (p.price_num or 0) - max_price
+                d = p.to_dict()
+                d['is_alternative'] = True
+                d['alternative_type'] = 'budget_relaxed'
+                d['alternative_diff'] = f"+₹{p_diff:,.0f} above budget"
+                d['original_budget'] = max_price
+                d['lowest_matching_price'] = best_p.price_num
+                d['budget_diff'] = diff
+                d['alternative_explanation'] = (
+                    f"No exact match was found under ₹{max_price:,.0f}. "
+                    f"The lowest-priced matching option found is ₹{best_p.price_num:,.0f}, "
+                    f"so you may need to increase your budget by ₹{diff:,.0f}."
+                )
+                alternatives.append(d)
 
-            # Add up to 2 more budget-relaxed items if available
-            for extra_p in price_exceeded_candidates[1:3]:
-                ed = extra_p.to_dict()
-                e_diff = (extra_p.price_num or 0) - max_price
-                ed['is_alternative'] = True
-                ed['alternative_type'] = 'budget_relaxed'
-                ed['alternative_diff'] = f"+₹{e_diff:,.0f} above budget"
-                alternatives.append(ed)
+            lowest_spec_match = alternatives[0]
+            # When budget-relaxed matching products are found, return immediately without mixing in spec compromises
+            meta = {
+                'has_alternatives': True,
+                'lowest_spec_match': lowest_spec_match,
+                'in_budget_alt': None,
+                'total_alternatives': len(alternatives),
+            }
+            return alternatives[:top_n], meta
 
     # ══════════════════════════════════════════════════════════════════════════
     # STRATEGY 2: SPECIFICATION RELAXATION (In-budget with secondary spec change)
@@ -139,8 +157,12 @@ def find_smart_alternatives(
             # Relax GPU requirement
             relaxed_specs_gpu = {k: v for k, v in tech_specs.items() if k != 'gpu'}
             gpu_rel_q = f"laptop Intel i5 under Rs.{max_price:,} India" if 'i5' in str(tech_specs.get('cpu')) else f"laptop under Rs.{max_price:,} India"
-            raw_in_budget = _serpapi(gpu_rel_q, num=12)
-            norm_in_budget = [normalize_raw_item(it, gpu_rel_q) for it in raw_in_budget]
+            raw_in_budget = [] if candidate_products else _serpapi(gpu_rel_q, num=12)
+            norm_in_budget = (
+                list(candidate_products)
+                if candidate_products
+                else [normalize_raw_item(it, gpu_rel_q) for it in raw_in_budget]
+            )
 
             for p in norm_in_budget:
                 v_gpu_rel = validate_product(
@@ -163,8 +185,12 @@ def find_smart_alternatives(
         # recommend in-budget high-rated wired in-ear earphones
         elif audio_type == 'earbuds' and max_price <= 1000:
             wired_q = f"wired in-ear earphones under Rs.{max_price:,} India"
-            raw_wired = _serpapi(wired_q, num=10)
-            norm_wired = [normalize_raw_item(it, wired_q) for it in raw_wired]
+            raw_wired = [] if candidate_products else _serpapi(wired_q, num=10)
+            norm_wired = (
+                list(candidate_products)
+                if candidate_products
+                else [normalize_raw_item(it, wired_q) for it in raw_wired]
+            )
 
             for p in norm_wired:
                 v_wired = validate_product(
@@ -181,6 +207,57 @@ def find_smart_alternatives(
                 )
                 if v_wired.valid and p.price_num and p.price_num <= max_price:
                     in_budget_candidates.append((p, "Wired in-ear earphones (within ₹500 budget)"))
+
+        # 2c. Apparel & Office Wear: If specific fabric or style is restricted,
+        # find top-rated in-budget formal / office wear
+        elif category in ('office wear', 'clothing', 'shirt', 'formal wear'):
+            gender_str = ents.get('gender') or ''
+            gen_prefix = f"{gender_str} " if gender_str else ""
+            apparel_q = f"{gen_prefix}office wear formal attire shirt trousers under Rs.{max_price:,} India"
+            apparel_q = re.sub(r'\s+', ' ', apparel_q).strip()
+            if candidate_products:
+                norm_apparel = list(candidate_products)
+            else:
+                raw_apparel = _serpapi(apparel_q, num=12)
+                if not raw_apparel:
+                    raw_apparel = _scrapingdog(apparel_q, num=12)
+                norm_apparel = [normalize_raw_item(it, apparel_q) for it in raw_apparel]
+            for p in norm_apparel:
+                v_app = validate_product(
+                    prod=p,
+                    target_category=category,
+                    audio_type=None,
+                    want_brands=brands,
+                    max_price=max_price,
+                    min_price=min_price,
+                    tech_specs={},  # Relax specific fabric to find top in-budget formal wear
+                    want_colors=colors,
+                    hard_requirements=[f"price <= {max_price}"],
+                    category_confidence=0.8,
+                    want_gender=ents.get('gender'),
+                )
+                if v_app.valid and p.price_num and p.price_num <= max_price:
+                    in_budget_candidates.append((p, f"Top-rated {gen_prefix}office wear within your ₹{max_price:,} budget"))
+
+        # 2d. Universal Category In-Budget Fallback: check candidates for items meeting budget & category
+        if not in_budget_candidates:
+            for p in candidate_products:
+                if p.price_num and p.price_num <= max_price:
+                    v_cat = validate_product(
+                        prod=p,
+                        target_category=category,
+                        audio_type=audio_type,
+                        want_brands=[],
+                        max_price=max_price,
+                        min_price=min_price,
+                        tech_specs={},
+                        want_colors=[],
+                        hard_requirements=[],
+                        category_confidence=0.7,
+                        want_gender=ents.get('gender'),
+                    )
+                    if v_cat.valid:
+                        in_budget_candidates.append((p, f"Popular in-budget {category or 'product'} alternative"))
 
         if in_budget_candidates:
             # Sort by rating and price fit

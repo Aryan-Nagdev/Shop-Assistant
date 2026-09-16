@@ -1,5 +1,5 @@
 """
-llm_reason.py  –  LLM-powered deep query understanding via Groq (llama3-70b)
+llm_reason.py  –  LLM-powered deep query understanding via Groq (openai/gpt-oss-20b)
 ──────────────────────────────────────────────────────────────────────────────
 v2 Fixes:
   1. Audio type strictly enforced — earbuds/earphones/headphones never mixed
@@ -9,7 +9,9 @@ v2 Fixes:
   5. search_queries use exact audio_type word always
 """
 import os, sys, json, re
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+from dotenv import load_dotenv
+load_dotenv()
 
 _client = None
 
@@ -21,7 +23,7 @@ def _get_client():
         from groq import Groq
     except ImportError:
         raise ImportError("groq package missing — run: pip install groq")
-    key = os.getenv("GROQ_API_KEY", "").strip().strip("'\"")
+    key = (getattr(config, 'GROQ_API_KEY', None) or os.getenv("GROQ_API_KEY", "")).strip().strip("'\"")
     if not key:
         raise ValueError("GROQ_API_KEY not set in .env")
     _client = Groq(api_key=key)
@@ -177,10 +179,11 @@ CRITICAL RULES:
 
 def llm_reason(query: str, language: str = 'en') -> dict:
     """
-    Deep query understanding via Groq llama3-70b.
+    Deep query understanding via Groq.
     Returns dict with intent, explanation, items, count, features,
     vague_expansions, search_queries, confidence.
     Never raises — returns safe fallback on any error.
+    Retries once on timeout to avoid non-deterministic failures.
     """
     _FALLBACK = {
         'intent': None, 'explanation': '', 'items': [], 'count': None,
@@ -189,96 +192,118 @@ def llm_reason(query: str, language: str = 'en') -> dict:
     }
 
     raw = ''
-    try:
-        from src.language_helper import get_language_prompt_directive
-        lang_prompt = get_language_prompt_directive(language)
-        effective_system = f"{_SYSTEM}\n\n{lang_prompt}"
 
-        client = _get_client()
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": effective_system},
-                {"role": "user",   "content": query.strip()},
-            ],
-            temperature=0.1,
-            max_tokens=600,
-            timeout=2.5,
-        )
-        raw = resp.choices[0].message.content.strip()
-        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.DOTALL).strip()
+    def _attempt(timeout_secs: float) -> dict | None:
+        nonlocal raw
+        try:
+            from src.language_helper import get_language_prompt_directive
+            lang_prompt = get_language_prompt_directive(language)
+            effective_system = f"{_SYSTEM}\n\n{lang_prompt}"
 
-        data = json.loads(raw, strict=False)
+            client = _get_client()
+            resp = client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {"role": "system", "content": effective_system},
+                    {"role": "user",   "content": query.strip()},
+                ],
+                temperature=0.1,
+                max_tokens=600,
+                timeout=timeout_secs,
+            )
+            raw = resp.choices[0].message.content.strip()
+            raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.DOTALL).strip()
 
-        valid_intents = ('information', 'comparison', 'recommendation', 'product_search', 'multi_item')
-        if data.get('intent') not in valid_intents:
-            # Graceful backward compat: map legacy intent names
-            _LEGACY_MAP = {'answer_only': 'information'}
-            legacy = _LEGACY_MAP.get(data.get('intent'))
-            if legacy:
-                data['intent'] = legacy
+            data = json.loads(raw, strict=False)
+
+            valid_intents = ('information', 'comparison', 'recommendation', 'product_search', 'multi_item')
+            if data.get('intent') not in valid_intents:
+                _LEGACY_MAP = {'answer_only': 'information'}
+                legacy = _LEGACY_MAP.get(data.get('intent'))
+                if legacy:
+                    data['intent'] = legacy
+                else:
+                    print(f"[LLM] Unknown intent '{data.get('intent')}', using fallback")
+                    return None
+
+            features = data.get('features') or {}
+            audio_type = (features.get('audio_type') or '').strip().lower()
+            valid_audio = ('earbuds', 'earphones', 'headphones', 'neckband', 'speaker')
+            if audio_type not in valid_audio:
+                audio_type = None
             else:
-                print(f"[LLM] Unknown intent '{data.get('intent')}', using fallback")
-                return _FALLBACK
+                features['audio_type'] = audio_type
 
-        features = data.get('features') or {}
-        audio_type = (features.get('audio_type') or '').strip().lower()
-        valid_audio = ('earbuds', 'earphones', 'headphones', 'neckband', 'speaker')
-        if audio_type not in valid_audio:
-            audio_type = None
-        else:
-            features['audio_type'] = audio_type
-
-        # Validate count is integer
-        raw_count = data.get('count')
-        count = None
-        if raw_count is not None:
-            try:
-                count = int(raw_count)
-                if count <= 0:
+            raw_count = data.get('count')
+            count = None
+            if raw_count is not None:
+                try:
+                    count = int(raw_count)
+                    if count <= 0:
+                        count = None
+                except (TypeError, ValueError):
                     count = None
-            except (TypeError, ValueError):
-                count = None
 
-        # Compute canonical intent (maps multi_item -> recommendation for routing)
-        _CANONICAL_MAP = {
-            'information':   'information',
-            'comparison':    'comparison',
-            'recommendation': 'recommendation',
-            'product_search': 'product_search',
-            'multi_item':    'recommendation',  # multi_item still uses recommendation path
-        }
-        raw_intent = data.get('intent')
-        canonical_intent = _CANONICAL_MAP.get(raw_intent, 'recommendation')
+            _CANONICAL_MAP = {
+                'information':    'information',
+                'comparison':     'comparison',
+                'recommendation': 'recommendation',
+                'product_search': 'product_search',
+                'multi_item':     'recommendation',
+            }
+            raw_intent = data.get('intent')
+            canonical_intent = _CANONICAL_MAP.get(raw_intent, 'recommendation')
 
-        # Extract LLM's search_required assessment
-        llm_search_required = data.get('search_required')
-        if llm_search_required is None:
-            # Default based on canonical intent
-            llm_search_required = canonical_intent in ('recommendation', 'product_search', 'multi_item')
-        else:
-            llm_search_required = bool(llm_search_required)
+            llm_search_required = data.get('search_required')
+            if llm_search_required is None:
+                llm_search_required = canonical_intent in ('recommendation', 'product_search', 'multi_item')
+            else:
+                llm_search_required = bool(llm_search_required)
 
-        result = {
-            'intent':           raw_intent,
-            'canonical_intent': canonical_intent,
-            'search_required':  llm_search_required,
-            'explanation':      (data.get('explanation') or '').strip(),
-            'items':            data.get('items') or [],
-            'count':            count,
-            'features':         features,
-            'vague_expansions': data.get('vague_expansions') or [],
-            'search_queries':   data.get('search_queries') or [],
-            'confidence':       float(data.get('confidence', 0.8)),
-        }
-        print(f"[LLM] intent={raw_intent!r} canonical={canonical_intent!r} "
-              f"search_required={llm_search_required} conf={result['confidence']:.2f} "
-              f"count={result['count']} audio_type={audio_type}")
-        return result
+            result = {
+                'intent':           raw_intent,
+                'canonical_intent': canonical_intent,
+                'search_required':  llm_search_required,
+                'explanation':      (data.get('explanation') or '').strip(),
+                'items':            data.get('items') or [],
+                'count':            count,
+                'features':         features,
+                'vague_expansions': data.get('vague_expansions') or [],
+                'search_queries':   data.get('search_queries') or [],
+                'confidence':       float(data.get('confidence', 0.8)),
+            }
+            print(f"[LLM] intent={raw_intent!r} canonical={canonical_intent!r} "
+                  f"search_required={llm_search_required} conf={result['confidence']:.2f} "
+                  f"count={result['count']} audio_type={audio_type}")
+            return result
 
-    except json.JSONDecodeError as e:
-        print(f"[LLM] JSON parse error: {e} | raw={raw[:300]!r}")
-        return _FALLBACK
+        except json.JSONDecodeError as e:
+            print(f"[LLM] JSON parse error: {e} | raw={raw[:300]!r}")
+            return None
+        except Exception as e:
+            err_str = str(e)
+            if 'timeout' in err_str.lower() or 'timed out' in err_str.lower() or 'read timeout' in err_str.lower():
+                # Propagate timeout as a specific signal so caller can retry
+                raise TimeoutError(f"Groq timeout: {e}")
+            print(f"[LLM] Groq call failed: {e}")
+            return None
+
+    # First attempt — 5s (fast path)
+    try:
+        result = _attempt(5.0)
+        if result is not None:
+            return result
+    except TimeoutError:
+        print("[LLM] First attempt timed out — retrying with 9s limit...")
+        try:
+            result = _attempt(9.0)
+            if result is not None:
+                return result
+        except TimeoutError:
+            print("[LLM] Second attempt also timed out — using QU/NLU fallback.")
+        except Exception as e:
+            print(f"[LLM] Retry failed: {e}")
     except Exception as e:
         print(f"[LLM] Groq call failed: {e}")
-        return _FALLBACK
+
+    return _FALLBACK

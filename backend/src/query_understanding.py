@@ -409,11 +409,16 @@ _PRODUCT_CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ('kurta',           re.compile(r'\b(?:kurtas?|kurtis?|kurti\s*sets?|sherwanis?|ethnic\s*wear)\b', re.I)),
     ('saree',           re.compile(r'\b(?:sarees?|saris?|lehengas?|blouses?|anarkalis?)\b', re.I)),
     ('dress',           re.compile(r'\b(?:dresses?|gowns?|frocks?|jumpsuits?|skirts?)\b', re.I)),
+    ('office wear',     re.compile(
+        r'\b(?:office\s*(?:wear|pants?|trousers?|shirts?|clothes|attire|outfit)|'
+        r'work\s*(?:wear|pants?|trousers?)|formal\s*(?:wear|pants?|trousers?|attire|clothes)|'
+        r'corporate\s*wear)\b', re.I)),
     ('trouser',         re.compile(r'\b(?:trousers?|pants?|chinos?|cargos?|cargo\s*pants?|track\s*pants?|joggers?|shorts?)\b', re.I)),
     ('sunglasses',      re.compile(r'\b(?:sunglasses|shades|goggles|eyewear|spectacles|glasses)\b', re.I)),
     ('smart bulb',      re.compile(r'\b(?:smart\s*bulbs?|led\s*bulbs?|strip\s*lights?|smart\s*plugs?|lights?|lamps?)\b', re.I)),
     ('furniture',       re.compile(r'\b(?:office\s*chairs?|gaming\s*chairs?|study\s*tables?|desks?|chairs?|tables?|mattress(?:es)?|pillows?|sofas?|bean\s*bags?)\b', re.I)),
     ('fitness',         re.compile(r'\b(?:yoga\s*mats?|dumbbells?|treadmills?|exercise\s*cycles?|resistance\s*bands?|cycles?|bicycles?|protein|creatine)\b', re.I)),
+    ('clothing',        re.compile(r'\b(?:clothes|clothing|apparel|outfits?|wear|something\s+for\s+(?:college|school|campus|university))\b', re.I)),
 ]
 
 # Canonical category vocabulary for typo matching
@@ -425,7 +430,9 @@ _CATEGORY_VOCAB: list[str] = [
     "charger", "gaming console", "trimmer", "hair dryer", "perfume", "skincare",
     "microwave", "air fryer", "water purifier", "geyser", "mixer grinder", "induction",
     "vacuum cleaner", "fan", "air purifier", "iron", "hoodie", "jacket", "kurta",
-    "saree", "dress", "trouser", "sunglasses", "smart bulb", "furniture", "fitness"
+    "saree", "dress", "trouser", "sunglasses", "smart bulb", "furniture", "fitness",
+    "office wear", "formal wear", "clothing", "apparel", "wear", "cotton", "linen",
+    "denim", "blazer", "college", "sneakers",
 ]
 _CATEGORY_VOCAB_SET: set[str] = set(_CATEGORY_VOCAB)
 
@@ -454,6 +461,60 @@ _COMMON_TYPO_MAP: dict[str, str] = {
     "comapre":     "compare",
     "compair":     "compare",
     "v/s":         "vs",
+    # Apparel & Fashion typos
+    "waer":        "wear",
+    "ware":        "wear",
+    "wearr":       "wear",
+    "cloths":      "clothes",
+    "clothng":     "clothing",
+    "aparel":      "apparel",
+    "shrt":        "shirt",
+    "tshrt":       "t-shirt",
+    "t-shrt":      "t-shirt",
+    "jeens":       "jeans",
+    "jens":        "jeans",
+    "shoose":      "shoes",
+    "shoos":       "shoes",
+    "sheos":       "shoes",
+    "snekers":     "sneakers",
+    "pant":        "pants",
+    "pents":       "pants",
+    "trouser":     "trousers",
+    "blaser":      "blazer",
+    # Material / Fabric typos
+    "cooton":      "cotton",
+    "coton":       "cotton",
+    "cotten":      "cotton",
+    "cottons":     "cotton",
+    "linin":       "linen",
+    "polyestr":    "polyester",
+    "lethr":       "leather",
+    # Gender typos / normalizations
+    "mens":        "men's",
+    "womens":      "women's",
+    "womans":      "women's",
+    "wemens":      "women's",
+
+    # Truncated shirt/t-shirt variants
+    "shir":        "shirt",
+    "shirs":       "shirts",
+    "tshir":       "t-shirt",
+    "t-shir":      "t-shirt",
+    "shrit":       "shirt",
+    "tshrit":      "t-shirt",
+
+    # Other common truncations
+    "sho":         "shoes",
+    "shoez":       "shoes",
+    "jeen":        "jeans",
+    "jeens":       "jeans",
+    "pant":        "pants",
+    "trouser":     "trousers",
+    "hoodi":       "hoodie",
+    "hodi":        "hoodie",
+    "jaket":       "jacket",
+    "jakct":       "jacket",
+    "kurtaa":      "kurta",
 }
 
 
@@ -630,7 +691,37 @@ _SPEC_RULES: list[tuple[str, list[tuple[re.Pattern, Any]]]] = [
         (re.compile(r'\b(?:true\s+wireless|wireless|tws)\b', re.I), lambda m: "wireless"),
         (re.compile(r'\bwired\b', re.I), lambda m: "wired"),
     ]),
+
+    # ── Fashion / Fabric / Material Specific ──
+    ("material", [
+        (re.compile(r'\b(?:cotton\s+blend|poly\s*cotton|cooton\s+blend)\b', re.I), lambda m: "cotton blend"),
+        (re.compile(r'\b(?:pure\s+cotton|100%\s*cotton|cotton|cooton)\b', re.I), lambda m: "cotton"),
+        (re.compile(r'\b(?:linen\s+blend|linen)\b', re.I), lambda m: "linen"),
+        (re.compile(r'\b(?:denim|jeans\s+fabric)\b', re.I), lambda m: "denim"),
+        (re.compile(r'\b(?:silk|tussar|chiffon|georgette)\b', re.I), lambda m: "silk"),
+        (re.compile(r'\b(?:leather|faux\s+leather|pu\s+leather)\b', re.I), lambda m: "leather"),
+        (re.compile(r'\b(?:polyester|poly)\b', re.I), lambda m: "polyester"),
+        (re.compile(r'\b(?:wool|woolen|cashmere)\b', re.I), lambda m: "wool"),
+        (re.compile(r'\b(?:nylon|spandex|lycra|rayon|viscose)\b', re.I), lambda m: m.group(0).lower()),
+    ]),
 ]
+
+
+_GENDER_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ('women', re.compile(r"\b(?:women'?s?|female|girls?|ladies?|lady|her)\b", re.I)),
+    ('men',   re.compile(r"\b(?:men'?s?|male|boys?|gents?|gentleman|his)\b", re.I)),
+    ('kids',  re.compile(r"\b(?:kids?|children|child|baby|toddler|infant)\b", re.I)),
+    ('unisex', re.compile(r"\b(?:unisex)\b", re.I)),
+]
+
+
+def _detect_gender(text: str) -> str | None:
+    """Extract intended target gender/audience from query text."""
+    for g, pat in _GENDER_PATTERNS:
+        if pat.search(text):
+            return g
+    return None
+
 
 
 def _extract_specifications(text: str) -> dict[str, str]:
@@ -791,6 +882,8 @@ def _classify_requirements(
 
         if is_qualitative and not is_mandatory:
             soft.append(spec_entry)
+        elif spec_name == 'material' and not is_mandatory:
+            soft.append(spec_entry)
         else:
             hard.append(spec_entry)
 
@@ -858,7 +951,7 @@ _COMPARISON_STRONG = re.compile(
 
 # Weak comparison patterns — can also indicate info/concept questions when no brands present
 _COMPARISON_WEAK = re.compile(
-    r'\bwhich\s+is\s+better\b|\bbetter\s+than\b|\bis\s+\w+\s+better\b',
+    r'\bwhich\s+(?:one\s+)?is\s+better\b|\bbetter\s+than\b|\bis\s+\w+\s+better\b',
     re.I,
 )
 
@@ -908,20 +1001,32 @@ def _detect_intent_signals(text: str, detected_brands: list[str] | None = None) 
             return 'comparison', False
         return 'information', False
 
+    # ── Material queries (what material / what is it made of / explain material) ───
+    if re.search(
+        r'\b(?:material|fabric|what\s+(?:is\s+it|is\s+this|are\s+they)\s+made\s+of|'
+        r'made\s+of|upper\s+material|main\s+body|what\s+does\s+.*mean|explain\s+the\s+material|'
+        r'tell\s+me\s+about\s+.*(?:used\s+for|material|plastic|aluminum)|is\s+this\s+cotton)\b',
+        text, re.I,
+    ) and not has_price and not bool(re.search(r'\b(?:buy|order|purchase)\b', text, re.I)):
+        return 'information', False
+
     # ── Information queries (what is / explain / how does) ─────────────────────
     if _INFO_PATTERNS.search(text) and not _SEARCH_SIGNALS.search(text):
+        if re.search(
+            r'\b(?:this|these|that|them|the\s+(?:shoe|product|one)|which\s+one)\b',
+            text, re.I,
+        ):
+            return 'information', False
         return 'information', False
 
     # ── Multi-brand comparison signal (2+ brands detected in query) ────────────
     # E.g. "which laptop is best hp or dell", "compare nike and adidas", "hp or dell"
     if detected_brands and len(detected_brands) >= 2:
-        search_hint = has_price or bool(_SEARCH_SIGNALS.search(text))
-        return 'comparison', search_hint
+        return 'comparison', True
 
     # ── Strong comparison signals (vs/compare/X or Y/difference between) ───────
     if _COMPARISON_STRONG.search(text):
-        search_hint = has_price or bool(_SEARCH_SIGNALS.search(text))
-        return 'comparison', search_hint
+        return 'comparison', True
 
     # ── Weak comparison (better than / which is better) ────────────────────────
     # Only treat as comparison if product/brand nouns are present.
@@ -960,6 +1065,7 @@ class QueryUnderstanding:
         'category',
         'category_confidence',
         'audio_type',
+        'gender',
         'brand',
         'brands',
         'brand_confidence',
@@ -977,14 +1083,17 @@ class QueryUnderstanding:
         'corrected_words',
         'intent',
         'search_required',
+        'wants_lowest_price',
     )
 
     def __init__(self):
         self.original_query: str = ""
         self.normalized_query: str = ""
+        self.wants_lowest_price: bool = False
         self.category: str | None = None
         self.category_confidence: float = 0.0
         self.audio_type: str | None = None
+        self.gender: str | None = None
         self.brand: str | list[str] | None = None
         self.brands: list[str] = []
         self.brand_confidence: float = 0.0
@@ -1013,6 +1122,8 @@ class QueryUnderstanding:
             "normalized_query": self.normalized_query,
             "category": self.category,
             "category_confidence": self.category_confidence,
+            "audio_type": self.audio_type,
+            "gender": self.gender,
             "brand": self.brand,
             "brands": self.brands,
             "brand_confidence": self.brand_confidence,
@@ -1037,6 +1148,7 @@ class QueryUnderstanding:
             f"Normalized Query    : {self.normalized_query}",
             f"Detected Category   : {self.category} (conf: {self.category_confidence:.2f})",
             f"Audio Type          : {self.audio_type}",
+            f"Detected Gender     : {self.gender}",
             f"Detected Brand      : {self.brand} (conf: {self.brand_confidence:.2f})",
             f"Detected Brands     : {self.brands}",
             f"Detected Colour     : {self.color}",
@@ -1128,7 +1240,8 @@ def _apply_vocabulary_typo_corrections(text: str) -> tuple[str, dict[str, str]]:
             continue
 
         # Step 2: RapidFuzz matching for category words only (length >= 4, not numbers)
-        if _RAPIDFUZZ_AVAILABLE and len(clean_w) >= 4 and not clean_w.isdigit():
+        _PROTECTED_WORDS = _BRAND_EXCLUSION_WORDS | {'office', 'gaming', 'coding', 'casual', 'formal', 'party', 'work', 'study', 'under', 'blend'}
+        if _RAPIDFUZZ_AVAILABLE and len(clean_w) >= 4 and not clean_w.isdigit() and clean_w not in _PROTECTED_WORDS:
             if clean_w not in _CATEGORY_VOCAB_SET and clean_w not in _COLOR_SET:
                 res = _rf_process.extractOne(
                     clean_w,
@@ -1207,9 +1320,10 @@ def understand(query: str) -> QueryUnderstanding:
         for cat_name, pattern in _PRODUCT_CATEGORY_PATTERNS:
             if pattern.search(qu.normalized_query) or pattern.search(qu.original_query):
                 qu.category = cat_name
-                # Check if it was matched via typo correction
+                # If category was matched via a typo correction, lower confidence slightly
+                # so the validator doesn't reject borderline-valid product titles
                 if any(c == cat_name for c in qu.corrected_words.values()):
-                    qu.category_confidence = 0.94
+                    qu.category_confidence = 0.85
                 else:
                     qu.category_confidence = 1.0
                 break
@@ -1220,8 +1334,24 @@ def understand(query: str) -> QueryUnderstanding:
     # ── Step 8: Specification Extraction ──────────────────────────────────────
     qu.specifications = _extract_specifications(qu.normalized_query)
 
+    # ── Step 8b: Target Gender / Audience Detection ───────────────────────────
+    qu.gender = _detect_gender(qu.normalized_query) or _detect_gender(qu.original_query)
+
     # ── Step 9: Use-Case Detection ────────────────────────────────────────────
-    qu.use_case = _detect_use_case(qu.normalized_query)
+    qu.use_case = _detect_use_case(qu.normalized_query) or _detect_use_case(qu.original_query)
+
+    # Infer a shoppable category from use-case when the user did not name a product
+    if not qu.category and not qu.audio_type and qu.use_case:
+        _USE_CASE_CATEGORY = {
+            'study':  'clothing',
+            'office': 'office wear',
+            'gym':    'shoes',
+        }
+        inferred = _USE_CASE_CATEGORY.get(qu.use_case)
+        if inferred:
+            qu.category = inferred
+            qu.category_confidence = 0.72
+            print(f"[QU] Inferred category={inferred!r} from use_case={qu.use_case!r}")
 
     # ── Step 10: Hard vs Soft Requirements Classification ─────────────────────
     qu.hard_requirements, qu.soft_preferences = _classify_requirements(
@@ -1234,6 +1364,7 @@ def understand(query: str) -> QueryUnderstanding:
         r'\b(?:under|below|less\s+than|upto?|up\s+to|within|max(?:imum)?|budget\s+of?|around)\s*[₹₨$rs\.]*\s*\d[\d,]*\s*(?:k\b|thousand\b)?',
         r'\b\d[\d,]*\s*(?:k\b|thousand\b)?\b',
         r'\b(?:best|top|good|find|show|get|suggest|recommend|i\s+need|i\s+want|looking\s+for|please|for|with|a|an|the|of|in|to)\b',
+        r'\b(?:women\'?s?|female|girls?|ladies?|lady|men\'?s?|male|boys?|gents?|gentleman|kids?|children|baby|unisex)\b',
         r'\bindia\b',
     ]
     for b in qu.brands:
@@ -1242,6 +1373,8 @@ def understand(query: str) -> QueryUnderstanding:
         remove_patterns.append(r'\b' + re.escape(qu.color.lower()) + r'\b')
     if qu.category:
         remove_patterns.append(r'\b' + re.escape(qu.category.lower()) + r'\b')
+    for spec_val in qu.specifications.values():
+        remove_patterns.append(r'\b' + re.escape(spec_val.lower()) + r'\b')
 
     for p in remove_patterns:
         kw_text = re.sub(p, ' ', kw_text, flags=re.I)
@@ -1252,11 +1385,18 @@ def understand(query: str) -> QueryUnderstanding:
     intent_hint, search_hint = _detect_intent_signals(raw_query, detected_brands=qu.brands)
     qu.intent = intent_hint
     qu.search_required = search_hint
+    qu.wants_lowest_price = bool(re.search(
+        r'\b(?:cheapest|lowest\s*(?:price|cost)?|least\s*expensive|most\s*affordable|'
+        r'cheaper|sasta|saste|kam\s*daam|kam\s*keemat)\b',
+        raw_query, re.I,
+    ))
 
     # ── Step 13: Meaningful Tokens & Overall Confidence Calculation ───────────
     conf = 0.0
     if qu.category:
-        conf += 0.45 * qu.category_confidence
+        conf += 0.40 * qu.category_confidence
+    if qu.gender:
+        conf += 0.15
     if qu.brands:
         conf += 0.25 * qu.brand_confidence
     if qu.price.get("max") is not None or qu.price.get("min") is not None:

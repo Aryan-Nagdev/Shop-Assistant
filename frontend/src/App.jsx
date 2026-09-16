@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   MessageSquare, 
   Plus, 
@@ -34,7 +34,12 @@ import {
   Laptop,
   Headphones,
   Globe,
-  ShoppingCart
+  ShoppingCart,
+  Layers,
+  MessageCircle,
+  Info,
+  Atom,
+  ShieldCheck
 } from 'lucide-react';
 
 const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
@@ -213,6 +218,10 @@ function App() {
   const [speakingMessageId, setSpeakingMessageId] = useState(null);
   const [quickViewProduct, setQuickViewProduct] = useState(null);
 
+  // ── Material Intelligence State ──────────────────────────────────────────
+  // materialCache: { [productTitle]: { status: 'loading'|'done'|'error', data: [] } }
+  const [materialCache, setMaterialCache] = useState({});
+
   // Intent-aware query suggestions
   const [querySuggestions, setQuerySuggestions] = useState([]);
   const [isSuggesting, setIsSuggesting] = useState(false);
@@ -265,6 +274,38 @@ function App() {
   const textareaRef = useRef(null);
   const carouselRefs = useRef({});
   const speechRecognitionRef = useRef(null);
+  const materialCacheRef = useRef({});
+
+  // ── fetchMaterials: progressive background loader ────────────────────────
+  const fetchMaterials = useCallback(async (product) => {
+    if (!product || !product.title) return;
+    const key = product.title;
+    // Skip if already cached or loading
+    if (materialCacheRef.current[key]) return;
+    materialCacheRef.current[key] = { status: 'loading', data: [] };
+    setMaterialCache(prev => ({ ...prev, [key]: { status: 'loading', data: [] } }));
+    try {
+      const res = await fetch(`${API_BASE}/api/materials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          product_title: product.title,
+          category:      product.category || '',
+          brand:         product.brand    || '',
+          description:   '',
+        }),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      const data = Array.isArray(json.materials) ? json.materials : [];
+      materialCacheRef.current[key] = { status: 'done', data };
+      setMaterialCache(prev => ({ ...prev, [key]: { status: 'done', data } }));
+    } catch (e) {
+      console.warn('[Materials] fetch failed:', e);
+      materialCacheRef.current[key] = { status: 'error', data: [] };
+      setMaterialCache(prev => ({ ...prev, [key]: { status: 'error', data: [] } }));
+    }
+  }, []);
 
   // --- Auto-scroll to end of chat ---
   useEffect(() => {
@@ -380,7 +421,9 @@ function App() {
         price_inr: product.price_inr || '₹0',
         mrp_inr: product.mrp_inr || '',
         discount: product.discount || '',
-        thumbnail: product.thumbnail || '',
+        thumbnail: product.thumbnail || product.fallback_thumbnail || product.serpapi_thumbnail || '',
+        fallback_thumbnail: product.fallback_thumbnail || '',
+        serpapi_thumbnail: product.serpapi_thumbnail || '',
         brand: product.brand || 'Product',
         rating: product.rating || null,
         reviews: product.reviews || 0,
@@ -570,13 +613,29 @@ function App() {
     showToast("Conversation removed.");
   };
 
+  // --- SAMPLE PROMPT CLICK HANDLER ---
+  const handleSamplePromptClick = (text) => {
+    if (isTyping || !text) return;
+    setInputMessage(text);
+    handleSendMessage(text);
+  };
+
   // --- SEND MESSAGE PIPELINE ---
   const handleSendMessage = async (customMessage = null) => {
-    const queryText = (customMessage || inputMessage).trim();
+    if (isTyping) return; // Prevent duplicate submissions while in-flight
+
+    let queryText = '';
+    if (typeof customMessage === 'string' && customMessage.trim()) {
+      queryText = customMessage.trim();
+    } else if (typeof inputMessage === 'string' && inputMessage.trim()) {
+      queryText = inputMessage.trim();
+    }
+
     if (!queryText && !imagePreview) return;
 
     // 1. Append User Message
     const userMsg = {
+      id: `msg-${Date.now()}-user`,
       role: 'user',
       content: queryText || "Identify this item from photo snapshot",
       image: imagePreview,
@@ -587,16 +646,36 @@ function App() {
     setImagePreview(null);
     setQuerySuggestions([]);
     setIsSuggesting(false);
-
-    const updatedChat = { ...activeChat };
-    updatedChat.messages = [...updatedChat.messages, userMsg];
-
-    if (updatedChat.title === 'New Conversation' || updatedChat.title === 'नई बातचीत') {
-      updatedChat.title = queryText.length > 25 ? `${queryText.substring(0, 25)}...` : queryText;
-    }
-
-    setConversations(conversations.map(c => c.id === activeChatId ? updatedChat : c));
     setIsTyping(true);
+
+    const currentChatId = activeChat?.id || activeChatId || 'welcome-chat';
+
+    setConversations(prev => {
+      const exists = prev.some(c => c.id === currentChatId);
+      if (exists) {
+        return prev.map(c => {
+          if (c.id === currentChatId) {
+            const newTitle = (c.title === 'New Conversation' || c.title === 'नई बातचीत')
+              ? (queryText.length > 25 ? `${queryText.substring(0, 25)}...` : queryText)
+              : c.title;
+            return {
+              ...c,
+              title: newTitle,
+              messages: [...c.messages, userMsg]
+            };
+          }
+          return c;
+        });
+      } else {
+        const newChat = {
+          id: currentChatId,
+          title: queryText.length > 25 ? `${queryText.substring(0, 25)}...` : queryText,
+          messages: [userMsg],
+          products: []
+        };
+        return [newChat, ...prev];
+      }
+    });
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 35000);
@@ -609,7 +688,7 @@ function App() {
         signal: controller.signal,
         body: JSON.stringify({
           message: queryText,
-          session_id: activeChatId,
+          session_id: currentChatId,
           language: selectedLanguage
         })
       });
@@ -681,23 +760,35 @@ function App() {
         }
       }
 
+      const cleanAnswer = (result.answer || '').replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*\*/g, '');
       const aiMsg = {
         id: `msg-${Date.now()}`,
         role: 'assistant',
-        content: result.answer,
+        content: cleanAnswer,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         componentType: (isComparison && comparisonData) ? 'comparison' : (rawProducts.length > 0 ? 'grid' : null),
         products: rawProducts,
         comparisonData: comparisonData
       };
 
-      updatedChat.messages = [...updatedChat.messages, aiMsg];
-      updatedChat.products = result.products || [];
       if (result.products && result.products.length > 0) {
         setIsRightSidebarOpen(true);
+        // Fire-and-forget material fetching for each product (background)
+        result.products.forEach(p => fetchMaterials(p));
       }
 
-      setConversations(conversations.map(c => c.id === activeChatId ? updatedChat : c));
+      setConversations(prev => {
+        return prev.map(c => {
+          if (c.id === currentChatId) {
+            return {
+              ...c,
+              messages: [...c.messages, aiMsg],
+              products: rawProducts
+            };
+          }
+          return c;
+        });
+      });
     } catch (err) {
       clearTimeout(timeoutId);
       console.warn("Backend request failed:", err);
@@ -722,10 +813,18 @@ function App() {
         comparisonData: null
       };
 
-      updatedChat.messages = [...updatedChat.messages, aiMsg];
-      updatedChat.products = [];
-
-      setConversations(conversations.map(c => c.id === activeChatId ? updatedChat : c));
+      setConversations(prev => {
+        return prev.map(c => {
+          if (c.id === currentChatId) {
+            return {
+              ...c,
+              messages: [...c.messages, aiMsg],
+              products: []
+            };
+          }
+          return c;
+        });
+      });
     } finally {
       setIsTyping(false);
     }
@@ -751,6 +850,86 @@ function App() {
     c.title.toLowerCase().includes(sidebarSearch.toLowerCase()) ||
     c.messages.some(m => m.content.toLowerCase().includes(sidebarSearch.toLowerCase()))
   );
+
+  // ── MaterialSection — Structured E-Commerce "Material & Build" Section ─────────
+  const MaterialSection = ({ product, compact = false, onAskAI }) => {
+    const key    = product?.title;
+    const entry  = key ? materialCache[key] : null;
+    const status = entry?.status;
+    const mats   = entry?.data || [];
+
+    if (!key) return null;
+
+    // Clean skeleton shimmer while analyzing
+    if (status === 'loading') {
+      return (
+        <div className="mt-2.5 pt-2.5 border-t border-zinc-800/40">
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Atom size={10} className="text-indigo-400 animate-spin" style={{ animationDuration: '2s' }} />
+            <span className="text-[9px] font-bold text-zinc-400 uppercase tracking-wider">Analyzing Material & Build...</span>
+          </div>
+          <div className="space-y-1.5">
+            {[1, 2].map(i => (
+              <div key={i} className="h-5 w-full bg-zinc-800/40 rounded animate-pulse" style={{ animationDelay: `${i * 0.15}s` }} />
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (!status || status === 'error' || mats.length === 0) return null;
+
+    const displayMats = compact ? mats.slice(0, 3) : mats;
+
+    return (
+      <div className="mt-2.5 pt-2.5 border-t border-zinc-800/50">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <ShieldCheck size={11} className="text-indigo-400" />
+            <span className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider">Material & Build</span>
+          </div>
+          <span className="text-[8px] font-semibold text-zinc-500 bg-zinc-800/60 px-1.5 py-0.5 rounded border border-zinc-700/40">Specs</span>
+        </div>
+        
+        {/* Structured Spec Rows */}
+        <div className="rounded-lg bg-zinc-900/60 border border-zinc-800/60 divide-y divide-zinc-800/40 overflow-hidden">
+          {displayMats.map((m, i) => (
+            <div 
+              key={i} 
+              className="flex items-center justify-between px-2 py-1 text-[10px] hover:bg-zinc-800/40 transition-colors group/row"
+              title={m.description || `${m.part}: ${m.material}`}
+            >
+              <span className="text-zinc-400 font-medium truncate max-w-[45%] flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-indigo-400/70 shrink-0"></span>
+                {m.part}:
+              </span>
+              <div className="flex items-center gap-1.5 max-w-[55%] justify-end">
+                <span className="font-semibold text-zinc-200 truncate">{m.material}</span>
+                {onAskAI && (
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAskAI(m.part, m.material);
+                    }}
+                    title={`Ask AI about ${m.material}`}
+                    className="opacity-0 group-hover/row:opacity-100 p-0.5 text-indigo-400 hover:text-indigo-300 transition-opacity"
+                  >
+                    <MessageCircle size={10} />
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {compact && mats.length > 3 && (
+          <span className="text-[8px] text-zinc-500 mt-1 inline-block font-medium">
+            +{mats.length - 3} more build specifications
+          </span>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-textPrimary select-none relative font-sans">
@@ -875,26 +1054,38 @@ function App() {
             </h4>
             <div className="grid grid-cols-2 gap-2">
               <div 
-                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all"
-                onClick={() => handleSendMessage(selectedLanguage === 'hi' ? "गेमिंग और कोडिंग के लिए बेस्ट लैपटॉप" : "Compare high performance laptops")}
+                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all hover:border-indigo-500/40"
+                onClick={() => {
+                  setIsLeftSidebarOpen(false);
+                  handleSamplePromptClick(selectedLanguage === 'hi' ? "गेमिंग और कोडिंग के लिए बेस्ट लैपटॉप" : "Compare high performance laptops");
+                }}
               >
                 <span>💻</span><span className="truncate">Tech</span>
               </div>
               <div 
-                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all"
-                onClick={() => handleSendMessage(selectedLanguage === 'hi' ? "रनिंग के लिए बेस्ट जूते" : "Best running sneakers")}
+                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all hover:border-indigo-500/40"
+                onClick={() => {
+                  setIsLeftSidebarOpen(false);
+                  handleSamplePromptClick(selectedLanguage === 'hi' ? "रनिंग के लिए बेस्ट जूते" : "Best running sneakers");
+                }}
               >
                 <span>👟</span><span className="truncate">Shoes</span>
               </div>
               <div 
-                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all"
-                onClick={() => handleSendMessage(selectedLanguage === 'hi' ? "विंटर जैकेट और हुडी" : "Suggest premium winter jackets")}
+                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all hover:border-indigo-500/40"
+                onClick={() => {
+                  setIsLeftSidebarOpen(false);
+                  handleSamplePromptClick(selectedLanguage === 'hi' ? "विंटर जैकेट और हुडी" : "Suggest premium winter jackets");
+                }}
               >
                 <span>🧥</span><span className="truncate">Fashion</span>
               </div>
               <div 
-                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all"
-                onClick={() => handleSendMessage(selectedLanguage === 'hi' ? "2000 के अंदर boAt वायरलेस ईयरबड्स" : "Top boat Bluetooth earbuds under 2000")}
+                className="flex items-center gap-2 p-2 bg-[#171717]/50 hover:bg-zinc-800/50 border border-zinc-800/40 rounded-xl cursor-pointer text-xs font-semibold transition-all hover:border-indigo-500/40"
+                onClick={() => {
+                  setIsLeftSidebarOpen(false);
+                  handleSamplePromptClick(selectedLanguage === 'hi' ? "2000 के अंदर boAt वायरलेस ईयरबड्स" : "Top boat Bluetooth earbuds under 2000");
+                }}
               >
                 <span>🎧</span><span className="truncate">Audio</span>
               </div>
@@ -1037,33 +1228,68 @@ function App() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 text-left">
-                  <div className="p-4 bg-[#0A0A0A]/60 border border-zinc-800/60 rounded-2xl space-y-2 hover:border-indigo-500/30 transition-all hover:-translate-y-0.5 backdrop-blur-md">
-                    <Sparkles size={16} className="text-indigo-400" />
-                    <h3 className="text-xs font-bold text-white">
+                {/* Sample Prompt Pills in Hero */}
+                <div className="flex flex-wrap gap-2 justify-center pt-2">
+                  {currentSuggestions.map((chip, idx) => (
+                    <button 
+                      key={idx}
+                      disabled={isTyping}
+                      className="px-3.5 py-1.5 bg-[#171717]/80 hover:bg-zinc-800/80 border border-zinc-800 hover:border-indigo-500/50 text-xs font-semibold rounded-full text-zinc-300 hover:text-white transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                      onClick={() => handleSamplePromptClick(chip.text)}
+                    >
+                      <span className="mr-1.5">{chip.icon}</span>
+                      <span>{chip.text}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 text-left">
+                  <div 
+                    className="p-4 bg-[#0A0A0A]/60 hover:bg-zinc-900/60 border border-zinc-800/60 hover:border-indigo-500/50 rounded-2xl space-y-2 cursor-pointer transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-md group"
+                    onClick={() => handleSamplePromptClick(selectedLanguage === 'hi' ? 'iPhone vs Samsung बेस्ट फोन की तुलना करें' : 'Compare iPhone 15 vs Samsung Galaxy S24')}
+                  >
+                    <Sparkles size={16} className="text-indigo-400 group-hover:scale-110 transition-transform" />
+                    <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition-colors">
                       {selectedLanguage === 'hi' ? 'ब्रांड्स की तुलना' : 'Compare Tech & Fashion'}
                     </h3>
                     <p className="text-[10px] text-textSecondary leading-normal">
                       {selectedLanguage === 'hi' ? 'साइड-बाय-साइड तुलना और निष्पक्ष विजेता निर्णय।' : 'Interactive side-by-side sheets pitting specs and prices.'}
                     </p>
+                    <div className="text-[10px] text-indigo-400 font-semibold pt-1 flex items-center gap-1">
+                      <span>{selectedLanguage === 'hi' ? 'क्लिक करें: iPhone vs Samsung ➔' : 'Try: iPhone vs Samsung ➔'}</span>
+                    </div>
                   </div>
-                  <div className="p-4 bg-[#0A0A0A]/60 border border-zinc-800/60 rounded-2xl space-y-2 hover:border-emerald-500/30 transition-all hover:-translate-y-0.5 backdrop-blur-md">
-                    <CheckCircle2 size={16} className="text-emerald-400" />
-                    <h3 className="text-xs font-bold text-white">
+
+                  <div 
+                    className="p-4 bg-[#0A0A0A]/60 hover:bg-zinc-900/60 border border-zinc-800/60 hover:border-emerald-500/50 rounded-2xl space-y-2 cursor-pointer transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-md group"
+                    onClick={() => handleSamplePromptClick(selectedLanguage === 'hi' ? '60000 के अंदर कोडिंग के लिए बेस्ट लैपटॉप' : 'Best laptop for coding under 60000')}
+                  >
+                    <CheckCircle2 size={16} className="text-emerald-400 group-hover:scale-110 transition-transform" />
+                    <h3 className="text-xs font-bold text-white group-hover:text-emerald-300 transition-colors">
                       {selectedLanguage === 'hi' ? 'सटीक ₹ बजट' : 'Curated INR Deals'}
                     </h3>
                     <p className="text-[10px] text-textSecondary leading-normal">
                       {selectedLanguage === 'hi' ? '₹ कीमतों और छूट के साथ सही सुझाव।' : 'Optimized Indian models with accurate pricing filters.'}
                     </p>
+                    <div className="text-[10px] text-emerald-400 font-semibold pt-1 flex items-center gap-1">
+                      <span>{selectedLanguage === 'hi' ? 'क्लिक करें: कोडिंग लैपटॉप ➔' : 'Try: Coding laptops ➔'}</span>
+                    </div>
                   </div>
-                  <div className="p-4 bg-[#0A0A0A]/60 border border-zinc-800/60 rounded-2xl space-y-2 hover:border-indigo-500/30 transition-all hover:-translate-y-0.5 backdrop-blur-md">
-                    <Mic size={16} className="text-indigo-400" />
-                    <h3 className="text-xs font-bold text-white">
-                      {selectedLanguage === 'hi' ? 'आवाज और विशलिस्ट' : 'Voice & Wishlist'}
+
+                  <div 
+                    className="p-4 bg-[#0A0A0A]/60 hover:bg-zinc-900/60 border border-zinc-800/60 hover:border-indigo-500/50 rounded-2xl space-y-2 cursor-pointer transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-md group"
+                    onClick={() => handleSamplePromptClick(selectedLanguage === 'hi' ? '2000 के अंदर boAt वायरलेस ईयरबड्स' : 'Best boAt earbuds under 2000')}
+                  >
+                    <Headphones size={16} className="text-indigo-400 group-hover:scale-110 transition-transform" />
+                    <h3 className="text-xs font-bold text-white group-hover:text-indigo-300 transition-colors">
+                      {selectedLanguage === 'hi' ? 'टॉप ऑडियो डील्स' : 'Top Audio & Earbuds'}
                     </h3>
                     <p className="text-[10px] text-textSecondary leading-normal">
-                      {selectedLanguage === 'hi' ? 'बोलकर खोजें और पसंद के उत्पाद सेव करें।' : 'Speak in Hindi/English and bookmark favourite deals locally.'}
+                      {selectedLanguage === 'hi' ? 'कम बजट में बेस्ट वायरलेस ईयरबड्स और हेडफोन्स।' : 'Curated wireless earbuds with best battery and sound quality.'}
                     </p>
+                    <div className="text-[10px] text-indigo-400 font-semibold pt-1 flex items-center gap-1">
+                      <span>{selectedLanguage === 'hi' ? 'क्लिक करें: boAt ईयरबड्स ➔' : 'Try: boAt earbuds ➔'}</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1117,7 +1343,7 @@ function App() {
 
                           {/* Markdown parsing inline */}
                           <div className="whitespace-pre-wrap space-y-3 pr-6">
-                            {msg.content.split('\n').map((line, lineIdx) => {
+                            {(msg.content || '').replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*\*/g, '').split('\n').map((line, lineIdx) => {
                               if (line.startsWith('- ') || line.startsWith('* ')) {
                                 return (
                                   <div key={lineIdx} className="flex items-start gap-2 pl-2">
@@ -1143,6 +1369,16 @@ function App() {
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6">
                               {msg.products.map((prod, pidx) => {
                                 const wishlisted = isItemWishlisted(prod);
+                                const matKey     = prod.title;
+                                const matEntry   = materialCache[matKey];
+
+                                // Build the "Ask AI about material" handler
+                                const handleAskMaterial = (part, material) => {
+                                  const question = `Tell me about ${material} used for the ${part} of products like the ${prod.title}. What are its key properties, benefits, and any tradeoffs?`;
+                                  setInputMessage(question);
+                                  setTimeout(() => textareaRef.current?.focus(), 100);
+                                };
+
                                 return (
                                   <div 
                                     key={pidx}
@@ -1150,7 +1386,23 @@ function App() {
                                   >
                                     {/* Thumbnail container */}
                                     <div className="relative w-full aspect-square bg-[#121214] rounded-xl overflow-hidden border border-zinc-800">
-                                      <img src={prod.thumbnail} alt={prod.title} className="w-full h-full object-cover" />
+                                      <img 
+                                        src={prod.thumbnail || prod.fallback_thumbnail || prod.serpapi_thumbnail} 
+                                        alt={prod.title} 
+                                        referrerPolicy="no-referrer"
+                                        loading="lazy"
+                                        onError={(e) => {
+                                          const cur = e.currentTarget.src;
+                                          const fb = prod.fallback_thumbnail;
+                                          const sp = prod.serpapi_thumbnail;
+                                          if (fb && cur !== fb) {
+                                            e.currentTarget.src = fb;
+                                          } else if (sp && cur !== sp) {
+                                            e.currentTarget.src = sp;
+                                          }
+                                        }}
+                                        className="w-full h-full object-cover" 
+                                      />
                                       <span className="absolute top-2.5 left-2.5 bg-black/60 backdrop-blur-md border border-zinc-800 text-[9px] font-bold text-zinc-300 px-2 py-0.5 rounded-md">
                                         {prod.source}
                                       </span>
@@ -1167,6 +1419,18 @@ function App() {
                                           className={wishlisted ? 'text-rose-500 scale-110' : ''} 
                                         />
                                       </button>
+
+                                      {/* Material analysis trigger badge on thumbnail */}
+                                      {!matEntry && (
+                                        <button
+                                          className="absolute bottom-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/70 border border-indigo-500/20 text-indigo-300 text-[8px] font-bold hover:bg-indigo-950/60 transition-all"
+                                          onClick={() => fetchMaterials(prod)}
+                                          title="Load material breakdown"
+                                        >
+                                          <Layers size={9} />
+                                          Materials
+                                        </button>
+                                      )}
                                     </div>
 
                                     {/* Specifications */}
@@ -1185,6 +1449,15 @@ function App() {
                                             <span className="text-[10px] text-zinc-400">({prod.reviews})</span>
                                           </div>
                                         )}
+
+                                        {/* ── MATERIAL BREAKDOWN ── */}
+                                        <div className="pb-1">
+                                          <MaterialSection
+                                            product={prod}
+                                            compact={true}
+                                            onAskAI={handleAskMaterial}
+                                          />
+                                        </div>
                                       </div>
 
                                       {/* Pricing & Visit Action */}
@@ -1378,11 +1651,14 @@ function App() {
                   }
                   className="w-full bg-transparent border-0 outline-none text-sm text-textPrimary placeholder-zinc-500 resize-none max-h-32"
                   value={inputMessage}
+                  disabled={isTyping}
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      handleSendMessage();
+                      if (!isTyping && inputMessage.trim()) {
+                        handleSendMessage();
+                      }
                     }
                   }}
                 />
@@ -1390,12 +1666,20 @@ function App() {
 
               <div className="flex items-center gap-2 flex-shrink-0">
                 <button 
-                  className="w-10 h-10 rounded-2xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/20 disabled:shadow-none"
-                  disabled={!inputMessage.trim() && !imagePreview}
-                  onClick={() => handleSendMessage()}
-                  title="Send query"
+                  className="w-10 h-10 rounded-2xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/20 disabled:shadow-none cursor-pointer disabled:cursor-not-allowed"
+                  disabled={isTyping || (!inputMessage.trim() && !imagePreview)}
+                  onClick={() => {
+                    if (!isTyping && (inputMessage.trim() || imagePreview)) {
+                      handleSendMessage();
+                    }
+                  }}
+                  title={isTyping ? "Searching live stores..." : "Send query"}
                 >
-                  <Send size={16} />
+                  {isTyping ? (
+                    <div className="w-4 h-4 rounded-full border-2 border-white/70 border-t-transparent animate-spin" />
+                  ) : (
+                    <Send size={16} />
+                  )}
                 </button>
               </div>
             </div>
@@ -1419,10 +1703,11 @@ function App() {
                       {querySuggestions.map((suggestion, idx) => (
                         <button
                           key={idx}
-                          className="flex-shrink-0 px-3 py-1.5 bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-500/30 hover:border-indigo-400/60 text-xs font-medium rounded-full text-indigo-200 hover:text-white transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-sm shadow-sm shadow-indigo-900/20"
+                          disabled={isTyping}
+                          className="flex-shrink-0 px-3 py-1.5 bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-500/30 hover:border-indigo-400/60 text-xs font-medium rounded-full text-indigo-200 hover:text-white transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-sm shadow-sm shadow-indigo-900/20 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                           onClick={() => {
                             setQuerySuggestions([]);
-                            handleSendMessage(suggestion);
+                            handleSamplePromptClick(suggestion);
                           }}
                         >
                           ✦ {suggestion}
@@ -1440,8 +1725,9 @@ function App() {
                 {currentSuggestions.map((chip, idx) => (
                   <button 
                     key={idx}
-                    className="flex-shrink-0 px-4 py-2 bg-[#171717]/60 hover:bg-zinc-800/60 border border-zinc-800/60 hover:border-zinc-700 text-xs font-semibold rounded-full text-zinc-300 hover:text-white transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-sm"
-                    onClick={() => handleSendMessage(chip.text)}
+                    disabled={isTyping}
+                    className="flex-shrink-0 px-4 py-2 bg-[#171717]/60 hover:bg-zinc-800/60 border border-zinc-800/60 hover:border-zinc-700 text-xs font-semibold rounded-full text-zinc-300 hover:text-white transition-all hover:-translate-y-0.5 active:translate-y-0 backdrop-blur-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={() => handleSamplePromptClick(chip.text)}
                   >
                     <span className="mr-1.5">{chip.icon}</span>
                     <span>{chip.text}</span>
@@ -1479,13 +1765,35 @@ function App() {
           {activeChat.products && activeChat.products.length > 0 ? (
             activeChat.products.map((prod, idx) => {
               const wishlisted = isItemWishlisted(prod);
+              const matEntry   = materialCache[prod.title];
+              const handleSidebarAskMaterial = (part, material) => {
+                const question = `Tell me about ${material} used for the ${part} in products like the ${prod.title}. Properties, benefits, and tradeoffs?`;
+                setInputMessage(question);
+                setTimeout(() => textareaRef.current?.focus(), 100);
+              };
               return (
                 <div 
                   key={idx}
                   className="bg-aiMessage/80 border border-zinc-800/80 rounded-2xl overflow-hidden flex flex-col p-4 space-y-3 transition-all hover:-translate-y-1 hover:shadow-2xl"
                 >
                   <div className="relative w-full aspect-square bg-[#121214]/60 rounded-xl overflow-hidden border border-zinc-800">
-                    <img src={prod.thumbnail} alt={prod.title} className="w-full h-full object-cover" />
+                    <img 
+                      src={prod.thumbnail || prod.fallback_thumbnail || prod.serpapi_thumbnail} 
+                      alt={prod.title} 
+                      referrerPolicy="no-referrer"
+                      loading="lazy"
+                      onError={(e) => {
+                        const cur = e.currentTarget.src;
+                        const fb = prod.fallback_thumbnail;
+                        const sp = prod.serpapi_thumbnail;
+                        if (fb && cur !== fb) {
+                          e.currentTarget.src = fb;
+                        } else if (sp && cur !== sp) {
+                          e.currentTarget.src = sp;
+                        }
+                      }}
+                      className="w-full h-full object-cover" 
+                    />
                     <span className="absolute top-2 left-2 bg-black/60 backdrop-blur-md border border-zinc-800 text-[8px] font-bold text-zinc-300 px-2 py-0.5 rounded-md">
                       {prod.source}
                     </span>
@@ -1511,6 +1819,22 @@ function App() {
                         <span className="text-[9px] text-zinc-400">({prod.reviews})</span>
                       </div>
                     )}
+
+                    {/* ── SIDEBAR COMPACT MATERIAL STRIP ── */}
+                    {!matEntry && (
+                      <button
+                        onClick={() => fetchMaterials(prod)}
+                        className="mt-2 flex items-center gap-1 text-[8px] text-indigo-400 hover:text-indigo-300 font-bold transition-colors"
+                      >
+                        <Layers size={9} />
+                        View Materials
+                      </button>
+                    )}
+                    <MaterialSection
+                      product={prod}
+                      compact={true}
+                      onAskAI={handleSidebarAskMaterial}
+                    />
                   </div>
 
                   <div className="pt-3 border-t border-zinc-800/40 flex flex-col gap-2.5">
@@ -1612,8 +1936,24 @@ function App() {
                     className="p-4 bg-[#171717]/80 border border-zinc-800 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 hover:border-zinc-700 transition-all"
                   >
                     <div className="flex items-center gap-4 min-w-0">
-                      {item.thumbnail ? (
-                        <img src={item.thumbnail} alt={item.title} className="w-16 h-16 object-cover rounded-xl border border-zinc-800 flex-shrink-0" />
+                      {item.thumbnail || item.fallback_thumbnail || item.serpapi_thumbnail ? (
+                        <img 
+                          src={item.thumbnail || item.fallback_thumbnail || item.serpapi_thumbnail} 
+                          alt={item.title} 
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
+                          onError={(e) => {
+                            const cur = e.currentTarget.src;
+                            const fb = item.fallback_thumbnail;
+                            const sp = item.serpapi_thumbnail;
+                            if (fb && cur !== fb) {
+                              e.currentTarget.src = fb;
+                            } else if (sp && cur !== sp) {
+                              e.currentTarget.src = sp;
+                            }
+                          }}
+                          className="w-16 h-16 object-cover rounded-xl border border-zinc-800 flex-shrink-0" 
+                        />
                       ) : (
                         <div className="w-16 h-16 bg-zinc-900 rounded-xl border border-zinc-800 flex items-center justify-center text-zinc-600 flex-shrink-0">
                           <ShoppingBag size={20} />
@@ -1819,95 +2159,249 @@ function App() {
       )}
 
       {/* ── QUICK VIEW PRODUCT INSPECTOR MODAL ── */}
-      {quickViewProduct && (
+      {quickViewProduct && (() => {
+        const qvMatEntry = materialCache[quickViewProduct.title];
+        const qvMats     = qvMatEntry?.data || [];
+        const handleQVAskMaterial = (part, material) => {
+          setQuickViewProduct(null);
+          const question = `Tell me about ${material} used for the ${part} of the ${quickViewProduct.title}. Properties, benefits, durability, and tradeoffs?`;
+          setInputMessage(question);
+          setTimeout(() => textareaRef.current?.focus(), 150);
+        };
+        return (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[9999] flex items-center justify-center animate-fade-in" onClick={() => setQuickViewProduct(null)}>
-          <div className="bg-chatSurface border border-zinc-800 rounded-3xl w-full max-w-xl mx-4 overflow-hidden shadow-2xl flex flex-col md:flex-row" onClick={(e) => e.stopPropagation()}>
-            {/* Image panel */}
-            <div className="md:w-1/2 relative bg-[#121214]/60 flex items-center justify-center border-b md:border-b-0 md:border-r border-zinc-800 p-6">
-              <img src={quickViewProduct.thumbnail} alt={quickViewProduct.title} className="w-full aspect-square object-cover rounded-2xl border border-zinc-800" />
-              <span className="absolute top-4 left-4 bg-black/60 border border-zinc-800 text-[10px] font-bold text-white px-2 py-0.5 rounded-lg">
-                {quickViewProduct.source}
-              </span>
+          <div
+            className="bg-chatSurface border border-zinc-800 rounded-3xl w-full max-w-2xl mx-4 overflow-hidden shadow-2xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxHeight: '90vh' }}
+          >
+            {/* Top: image + core info row */}
+            <div className="flex flex-col md:flex-row">
+              {/* Image panel */}
+              <div className="md:w-2/5 relative bg-[#121214]/60 flex items-center justify-center border-b md:border-b-0 md:border-r border-zinc-800 p-6 flex-shrink-0">
+                <img 
+                  src={quickViewProduct.thumbnail || quickViewProduct.fallback_thumbnail || quickViewProduct.serpapi_thumbnail} 
+                  alt={quickViewProduct.title} 
+                  referrerPolicy="no-referrer"
+                  loading="lazy"
+                  onError={(e) => {
+                    const cur = e.currentTarget.src;
+                    const fb = quickViewProduct.fallback_thumbnail;
+                    const sp = quickViewProduct.serpapi_thumbnail;
+                    if (fb && cur !== fb) {
+                      e.currentTarget.src = fb;
+                    } else if (sp && cur !== sp) {
+                      e.currentTarget.src = sp;
+                    }
+                  }}
+                  className="w-full aspect-square object-cover rounded-2xl border border-zinc-800" 
+                />
+                <span className="absolute top-4 left-4 bg-black/60 border border-zinc-800 text-[10px] font-bold text-white px-2 py-0.5 rounded-lg">
+                  {quickViewProduct.source}
+                </span>
+              </div>
+
+              {/* Spec details */}
+              <div className="md:w-3/5 p-6 flex flex-col justify-between space-y-4 overflow-y-auto">
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">{quickViewProduct.brand}</span>
+                    <button className="text-zinc-500 hover:text-white" onClick={() => setQuickViewProduct(null)}>
+                      <X size={18} />
+                    </button>
+                  </div>
+                  <h3 className="text-sm font-black text-white mt-2 leading-relaxed">{quickViewProduct.title}</h3>
+                  
+                  {quickViewProduct.rating && (
+                    <div className="flex items-center gap-1.5 mt-3">
+                      <div className="flex text-yellow-500 text-[11px]">
+                        {'★'.repeat(Math.round(quickViewProduct.rating))}
+                        {'☆'.repeat(5 - Math.round(quickViewProduct.rating))}
+                      </div>
+                      <span className="text-xs font-bold text-white">{quickViewProduct.rating}</span>
+                      <span className="text-xs text-zinc-500">({quickViewProduct.reviews} reviews)</span>
+                    </div>
+                  )}
+
+                  <div className="mt-3 p-3 bg-[#171717] rounded-xl border border-zinc-800/80 space-y-1">
+                    <span className="text-[9px] font-bold text-zinc-500 uppercase block">Availability</span>
+                    <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+                      <CheckCircle2 size={13} /> In stock on {quickViewProduct.source || 'Indian Stores'}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex justify-between items-center mb-3">
+                    <div>
+                      <span className="text-[9px] font-bold text-zinc-500 uppercase block">Current Price</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl font-black text-emerald-400">{quickViewProduct.price_inr}</span>
+                        {quickViewProduct.mrp_inr && (
+                          <span className="text-xs text-zinc-500 line-through">{quickViewProduct.mrp_inr}</span>
+                        )}
+                      </div>
+                    </div>
+                    {quickViewProduct.discount && (
+                      <span className="text-xs bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded-lg">
+                        {quickViewProduct.discount}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={(e) => toggleWishlist(e, quickViewProduct)}
+                      className="p-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-rose-400 rounded-2xl flex items-center justify-center transition-all border border-zinc-700"
+                      title="Save to Wishlist"
+                    >
+                      <Heart size={16} fill={isItemWishlisted(quickViewProduct) ? '#EF4444' : 'none'} className={isItemWishlisted(quickViewProduct) ? 'text-rose-500' : ''} />
+                    </button>
+
+                    {quickViewProduct.link && (
+                      <a 
+                        href={quickViewProduct.link} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        onClick={() => {
+                          triggerConfetti();
+                          setQuickViewProduct(null);
+                        }}
+                        className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-400 text-white text-xs font-black rounded-2xl flex items-center justify-center gap-2 transition-all hover:-translate-y-0.5 shadow-lg shadow-emerald-500/20 text-center"
+                      >
+                        <ExternalLink size={14} />
+                        <span>Visit Website to Buy</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
 
-            {/* Spec details */}
-            <div className="md:w-1/2 p-6 flex flex-col justify-between space-y-6">
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">{quickViewProduct.brand}</span>
-                  <button className="text-zinc-500 hover:text-white" onClick={() => setQuickViewProduct(null)}>
-                    <X size={18} />
+            {/* ── MATERIAL & BUILD SPECIFICATIONS PANEL ── */}
+            <div className="border-t border-zinc-800/60 p-5 bg-gradient-to-b from-zinc-950/60 to-black/80">
+              <div className="flex items-center justify-between mb-3.5">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+                    <ShieldCheck size={16} className="text-indigo-400" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-xs font-bold text-white tracking-wide uppercase">Material & Build</h4>
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-zinc-800/80 text-zinc-300 border border-zinc-700/50">
+                        Specifications
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-zinc-400">Key construction materials, structural chassis & protective elements</p>
+                  </div>
+                </div>
+                {!qvMatEntry && (
+                  <button
+                    onClick={() => fetchMaterials(quickViewProduct)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold shadow-lg shadow-indigo-600/30 transition-all"
+                  >
+                    <Atom size={12} className="animate-spin" style={{ animationDuration: '3s' }} />
+                    Analyze Build
+                  </button>
+                )}
+              </div>
+
+              {/* Loading shimmer */}
+              {qvMatEntry?.status === 'loading' && (
+                <div className="space-y-2 rounded-xl border border-zinc-800/60 p-3 bg-zinc-900/30">
+                  <div className="flex items-center gap-2 text-zinc-400 text-xs mb-1">
+                    <Atom size={12} className="text-indigo-400 animate-spin" />
+                    <span>Analyzing product architecture and component materials...</span>
+                  </div>
+                  {[1, 2, 3].map(i => (
+                    <div key={i} className="h-8 w-full bg-zinc-800/40 rounded-lg animate-pulse" style={{ animationDelay: `${i * 0.12}s` }} />
+                  ))}
+                </div>
+              )}
+
+              {/* E-Commerce Structured Specifications Table */}
+              {qvMats.length > 0 && (
+                <div className="rounded-xl border border-zinc-800/70 bg-zinc-900/40 divide-y divide-zinc-800/50 overflow-hidden shadow-sm">
+                  {qvMats.map((m, i) => (
+                    <div
+                      key={i}
+                      className="flex flex-col sm:flex-row sm:items-center justify-between px-3.5 py-2.5 hover:bg-zinc-800/30 transition-colors gap-1 sm:gap-3 group/spec"
+                    >
+                      {/* Attribute / Component Name */}
+                      <div className="sm:w-1/3 shrink-0 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0"></span>
+                        <span className="text-xs font-medium text-zinc-400">
+                          {m.part}
+                        </span>
+                      </div>
+
+                      {/* Material Value & Description */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-bold text-white tracking-tight">
+                            {m.material}
+                          </span>
+                          {m.confidence === 'high' && (
+                            <span className="text-[8px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-500/25 px-1.5 py-0.5 rounded">
+                              Verified Spec
+                            </span>
+                          )}
+                        </div>
+                        {m.description && (
+                          <p className="text-[10px] text-zinc-400 leading-relaxed mt-0.5 font-normal">
+                            {m.description}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Ask AI action button */}
+                      <div className="shrink-0 pt-1 sm:pt-0">
+                        <button
+                          onClick={() => handleQVAskMaterial(m.part, m.material)}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-indigo-600/30 text-zinc-300 hover:text-indigo-200 border border-zinc-700/60 hover:border-indigo-500/40 text-[10px] font-semibold transition-all"
+                          title={`Ask AI about ${m.material}`}
+                        >
+                          <MessageCircle size={10} className="text-indigo-400" />
+                          <span>Ask AI</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Prompt to load materials if not yet fetched */}
+              {!qvMatEntry && (
+                <div className="flex items-center justify-between p-3.5 bg-zinc-900/40 rounded-xl border border-zinc-800/60">
+                  <div className="flex items-center gap-3">
+                    <Atom size={16} className="text-indigo-400 flex-shrink-0" />
+                    <p className="text-xs text-zinc-400">
+                      View detailed body, frame, display glass, and component material breakdown for this product.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => fetchMaterials(quickViewProduct)}
+                    className="shrink-0 ml-3 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold transition-all shadow-md shadow-indigo-600/20"
+                  >
+                    Load Specs
                   </button>
                 </div>
-                <h3 className="text-sm font-black text-white mt-2 leading-relaxed">{quickViewProduct.title}</h3>
-                
-                {quickViewProduct.rating && (
-                  <div className="flex items-center gap-1.5 mt-3">
-                    <div className="flex text-yellow-500 text-[11px]">
-                      {'★'.repeat(Math.round(quickViewProduct.rating))}
-                      {'☆'.repeat(5 - Math.round(quickViewProduct.rating))}
-                    </div>
-                    <span className="text-xs font-bold text-white">{quickViewProduct.rating}</span>
-                    <span className="text-xs text-zinc-500">({quickViewProduct.reviews} reviews)</span>
-                  </div>
-                )}
+              )}
 
-                <div className="mt-4 p-4 bg-[#171717] rounded-2xl border border-zinc-800/80 space-y-1">
-                  <span className="text-[9px] font-bold text-zinc-500 uppercase block">Availability context</span>
-                  <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
-                    <CheckCircle2 size={13} /> In stock on {quickViewProduct.source || 'Indian Stores'}
+              {/* Subtle footer tip */}
+              {qvMats.length > 0 && (
+                <div className="mt-2.5 flex items-center justify-between text-[10px] text-zinc-500">
+                  <span className="flex items-center gap-1">
+                    <Info size={11} className="text-zinc-500" />
+                    Specifications dynamically mapped from verified hardware and apparel records.
                   </span>
                 </div>
-              </div>
-
-              <div>
-                <div className="flex justify-between items-center mb-4">
-                  <div>
-                    <span className="text-[9px] font-bold text-zinc-500 uppercase block">Current Price</span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xl font-black text-emerald-400">{quickViewProduct.price_inr}</span>
-                      {quickViewProduct.mrp_inr && (
-                        <span className="text-xs text-zinc-500 line-through">{quickViewProduct.mrp_inr}</span>
-                      )}
-                    </div>
-                  </div>
-                  {quickViewProduct.discount && (
-                    <span className="text-xs bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-bold px-2 py-0.5 rounded-lg">
-                      {quickViewProduct.discount}
-                    </span>
-                  )}
-                </div>
-
-                <div className="flex gap-2">
-                  <button 
-                    onClick={(e) => toggleWishlist(e, quickViewProduct)}
-                    className="p-3.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-rose-400 rounded-2xl flex items-center justify-center transition-all border border-zinc-700"
-                    title="Save to Wishlist"
-                  >
-                    <Heart size={18} fill={isItemWishlisted(quickViewProduct) ? '#EF4444' : 'none'} className={isItemWishlisted(quickViewProduct) ? 'text-rose-500' : ''} />
-                  </button>
-
-                  {quickViewProduct.link && (
-                    <a 
-                      href={quickViewProduct.link} 
-                      target="_blank" 
-                      rel="noopener noreferrer" 
-                      onClick={() => {
-                        triggerConfetti();
-                        setQuickViewProduct(null);
-                      }}
-                      className="flex-1 py-3.5 bg-emerald-500 hover:bg-emerald-400 text-white text-xs font-black rounded-2xl flex items-center justify-center gap-2 transition-all hover:-translate-y-0.5 shadow-lg shadow-emerald-500/20 text-center"
-                    >
-                      <ExternalLink size={15} />
-                      <span>Visit Website to Buy</span>
-                    </a>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* ── TOAST ALERT ── */}
       {toast.visible && (

@@ -506,12 +506,26 @@
     }
 
     // --- Chat Submission & API Communication ---
+    let isSubmitting = false;
+
     async function submitMessage() {
+      if (isSubmitting) return;
+
       const input = document.getElementById('userInput');
-      const text = input.value.trim();
+      const sendBtn = document.getElementById('sendBtn');
+      const text = (input ? input.value : '').trim();
       if (!text) return;
 
-      input.value = '';
+      isSubmitting = true;
+      if (input) {
+        input.value = '';
+        input.disabled = true;
+      }
+      if (sendBtn) {
+        sendBtn.disabled = true;
+        sendBtn.classList.add('opacity-50', 'cursor-not-allowed');
+      }
+
       document.getElementById('welcomeHero')?.remove();
 
       appendUserMessage(text);
@@ -536,13 +550,38 @@
           answer: currentLanguage === 'hi' ? "खोज सेवा से जुड़ने में त्रुटि हुई। कृपया पुनः प्रयास करें।" : "Could not connect to the shopping assistant. Please check your backend connection.",
           products: []
         });
+      } finally {
+        isSubmitting = false;
+        if (input) {
+          input.disabled = false;
+          input.focus();
+        }
+        if (sendBtn) {
+          sendBtn.disabled = false;
+          sendBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
       }
     }
 
     function sendQuickQuery(q) {
-      document.getElementById('userInput').value = q;
+      if (isSubmitting) return;
+      const input = document.getElementById('userInput');
+      if (input) input.value = q;
       submitMessage();
     }
+
+    // Attach Enter key listener to input
+    document.addEventListener('DOMContentLoaded', () => {
+      const inputEl = document.getElementById('userInput');
+      if (inputEl) {
+        inputEl.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            if (!isSubmitting) submitMessage();
+          }
+        });
+      }
+    });
 
     function appendUserMessage(text) {
       const container = document.getElementById('chatMessages');
@@ -624,6 +663,16 @@
     // Initialize UI on load
     setLanguage(currentLanguage);
     updateWishlistUI();
+
+    const textInput = document.getElementById('userInput');
+    if (textInput) {
+      textInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          if (!isSubmitting) submitMessage();
+        }
+      });
+    }
   </script>
 </body>
 </html>

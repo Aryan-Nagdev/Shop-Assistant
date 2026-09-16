@@ -37,6 +37,7 @@ class ShoppingContext:
         'turn_count',
         'last_intent',             # tracks intent across turns for follow-up routing
         'last_comparison_items',   # stores [BrandA, BrandB] from a comparison turn
+        'last_products',           # last product cards shown to the user
     )
 
     def __init__(self):
@@ -55,11 +56,13 @@ class ShoppingContext:
         self.turn_count: int = 0
         self.last_intent: str | None = None
         self.last_comparison_items: list[str] = []
+        self.last_products: list[dict] = []
 
     def is_empty(self) -> bool:
         return not (self.category or self.audio_type or self.brand or self.brands or self.max_price or self.specifications or self.color)
 
-    def clear(self):
+    def clear(self, keep_products: bool = False):
+        saved = list(self.last_products) if keep_products else []
         self.category = None
         self.audio_type = None
         self.brand = None
@@ -75,6 +78,7 @@ class ShoppingContext:
         self.turn_count = 0
         self.last_intent = None
         self.last_comparison_items = []
+        self.last_products = saved
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +117,8 @@ class ShoppingContext:
             parts.append(f"{self.specifications['gpu']} graphics")
         if self.specifications.get('anc'):
             parts.append("ANC")
+        if self.specifications.get('material'):
+            parts.append(self.specifications['material'])
         if self.use_case:
             parts.append(self.use_case)
 
@@ -157,7 +163,9 @@ class ConversationManager:
     _RESULT_REF_RE = re.compile(
         r'\b(?:which\s+one|between\s+(?:them|these)|of\s+(?:the\s+two|these|them)|'
         r'first\s+one|second\s+one|third\s+one|more\s+options|show\s+more|any\s+other|'
-        r'better\s+battery|better\s+camera|which\s+(?:is|has)\s+better)\b',
+        r'better\s+battery|better\s+camera|which\s+(?:is|has)\s+better|'
+        r'this\s+(?:one|shoe|product|shirt)|these\s+(?:ones|products|shoes)|'
+        r'made\s+of|material|fabric|is\s+this\s+cotton|upper\s+material)\b',
         re.I
     )
 
@@ -209,6 +217,8 @@ class ConversationManager:
 
         # 7. Check for pure budget modifications on the current item ("make it 60k", "under 60k", "budget 50k", "cheaper ones")
         if self._detect_budget_mod(user_msg) is not None:
+            if has_search_prefix and len(user_msg.split()) >= 3 and not re.search(r'\b(?:make\s+it|change|increase|reduce|adjust)\b', user_msg, re.I):
+                return False
             if not qu_raw.category or qu_raw.category == self.context.category:
                 return True
 
@@ -237,6 +247,9 @@ class ConversationManager:
         user_msg = raw_user_msg.strip()
         qu_raw = understand(user_msg)
 
+        # Keep shopping context for follow-ups about the products just shown
+        is_card_followup = bool(self._RESULT_REF_RE.search(user_msg)) and bool(self.context.last_products)
+
         # ── Check for Comparison Queries (Never corrupt with previous context) ──
         is_comparison = (
             qu_raw.intent == 'comparison'
@@ -245,9 +258,9 @@ class ConversationManager:
             or (qu_raw.brands and bool(re.search(r'\b(?:or|between|better|best)\b', user_msg, re.I)))
         )
 
-        if is_comparison:
+        if is_comparison and not is_card_followup:
             # Clean reset for comparison turn
-            self.context.clear()
+            self.context.clear(keep_products=True)
             self.context.last_intent = 'comparison'
             self.context.last_comparison_items = list(qu_raw.brands)
             self._apply_qu_to_context(qu_raw, user_msg)
@@ -256,11 +269,14 @@ class ConversationManager:
 
         # ── Check for Information / Concept Questions (Never corrupt with previous context) ──
         is_information = (
-            qu_raw.intent == 'information'
-            or bool(re.search(r'^\s*(?:what\s+is|what\s+are|explain|how\s+does|meaning\s+of|how\s+to|why\s+is)\b', user_msg, re.I))
+            not is_card_followup
+            and (
+                qu_raw.intent == 'information'
+                or bool(re.search(r'^\s*(?:what\s+is|what\s+are|explain|how\s+does|meaning\s+of|how\s+to|why\s+is)\b', user_msg, re.I))
+            )
         )
         if is_information:
-            self.context.clear()
+            self.context.clear(keep_products=True)
             self.context.last_intent = 'information'
             self._apply_qu_to_context(qu_raw, user_msg)
             normalized_q = qu_raw.normalized_query if qu_raw.normalized_query else user_msg
@@ -277,7 +293,7 @@ class ConversationManager:
 
         if not is_followup:
             print(f"[ConversationManager] New product request detected for: {user_msg!r} -> Resetting context")
-            self.context.clear()
+            self.context.clear(keep_products=True)
             self._apply_qu_to_context(qu_raw, user_msg)
             normalized_q = qu_raw.normalized_query if qu_raw.normalized_query else user_msg
             return self.context, qu_raw, normalized_q

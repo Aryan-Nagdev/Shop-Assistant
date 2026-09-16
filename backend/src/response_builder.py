@@ -22,7 +22,7 @@ def _llm_insight(prompt: str, max_tokens: int = 300) -> str:
             return ""
         client = Groq(api_key=key)
         resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=max_tokens,
@@ -63,6 +63,14 @@ def _clean_heading(*parts) -> str:
     return re.sub(r'\s+', ' ', joined).strip()
 
 
+def _strip_markdown_bold(text: str) -> str:
+    """Remove unwanted markdown ** asterisks everywhere from user-facing text."""
+    if not text:
+        return text
+    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    return cleaned.replace('**', '')
+
+
 # ── Info-only responses ────────────────────────────────────────────────────────
 _HOW_TO_TIPS = {
     'clean leather shoes':  "Use a soft damp cloth to wipe off dirt, then apply leather conditioner. Avoid soaking in water.",
@@ -89,32 +97,32 @@ def _info_response(query: str, ents: dict) -> str:
         for key, tip in _HOW_TO_TIPS.items():
             if all(word in topic_raw for word in key.split()):
                 return (
-                    f"**How to {topic_raw.title()}**\n\n"
+                    f"How to {topic_raw.title()}\n\n"
                     f"{tip}\n\n"
-                    f"💡 Want to **buy** {dept}? Just ask me to find or recommend one — "
+                    f"💡 Want to buy {dept}? Just ask me to find or recommend one — "
                     f"I'll pull live ₹ prices from Indian stores like Flipkart and Amazon.in."
                 )
 
         # Generic how-to
         return (
-            f"**How to {topic_raw.title()}**\n\n"
-            f"Here are the key steps for *{topic_raw}*:\n"
+            f"How to {topic_raw.title()}\n\n"
+            f"Here are the key steps for {topic_raw}:\n"
             f"- Research the options available in India\n"
             f"- Compare brands by ratings and reviews\n"
             f"- Check warranty and after-sales support\n"
             f"- Buy from trusted stores: Flipkart, Amazon.in, Croma\n\n"
-            f"💡 Want me to **find** or **recommend** {dept}? Just ask!"
+            f"💡 Want me to find or recommend {dept}? Just ask!"
         )
 
     # What is / explain
     if re.search(r'\bwhat is\b|\bwhat are\b|\bexplain\b|\bmeaning of\b', q):
         topic = re.sub(r'\bwhat (?:is|are)\b|\bexplain\b|\bmeaning of\b', '', q).strip()
         return (
-            f"**{topic.title()}** is a popular product category in {dept}.\n\n"
+            f"{topic.title()} is a popular product category in {dept}.\n\n"
             f"To get detailed specs and live ₹ prices, ask me to:\n"
-            f"- 🔍 *\"Find {topic} under ₹X\"*\n"
-            f"- ⚖️ *\"Compare [Brand A] vs [Brand B] {topic}\"*\n"
-            f"- 🥇 *\"Suggest 1 best {topic}\"*\n\n"
+            f"- 🔍 \"Find {topic} under ₹X\"\n"
+            f"- ⚖️ \"Compare [Brand A] vs [Brand B] {topic}\"\n"
+            f"- 🥇 \"Suggest 1 best {topic}\"\n\n"
             f"I'll fetch real listings from Flipkart, Amazon.in and more."
         )
 
@@ -122,16 +130,16 @@ def _info_response(query: str, ents: dict) -> str:
     if re.search(r'\bdifference\b', q) and not ents.get('brands'):
         return (
             "I can compare specific brands for you! Try:\n"
-            "- *\"Compare Dell vs HP laptop\"*\n"
-            "- *\"Realme vs Vivo phone for gaming\"*\n"
-            "- *\"Nike vs Adidas running shoes\"*\n\n"
+            "- \"Compare Dell vs HP laptop\"\n"
+            "- \"Realme vs Vivo phone for gaming\"\n"
+            "- \"Nike vs Adidas running shoes\"\n\n"
             "I'll show you side-by-side options with live ₹ prices."
         )
 
     return (
-        "That's a great question! For specific product help, ask me to **find**, "
-        "**recommend**, or **compare** — I'll pull live Indian store results with ₹ prices.\n\n"
-        f"Try: *\"Best {dept} under ₹10,000\"* or *\"Top {dept} in India\"*"
+        "That's a great question! For specific product help, ask me to find, "
+        "recommend, or compare — I'll pull live Indian store results with ₹ prices.\n\n"
+        f"Try: \"Best {dept} under ₹10,000\" or \"Top {dept} in India\""
     )
 
 
@@ -201,30 +209,16 @@ def _comparison_response(
                 items.append(f"- {title} | {price_v}" + (f" | {rating}" if rating else ""))
             brand_summaries.append(f"{brand}:\n" + "\n".join(items))
 
-    # ── LLM insight from real product data ───────────────────────────────────
+    # Fast comparison copy — skip Groq so product fetch is not blocked afterwards
     insight = ""
     if len(brands) >= 2 and brand_summaries:
-        products_text = "\n\n".join(brand_summaries)
-        lang_note = ""
-        if language == 'hi':
-            lang_note = "- Write the response in natural, clear Hindi (Devanagari script), keeping prices in ₹ and brand names in English/Hindi."
-        elif language == 'hinglish':
-            lang_note = "- Write the response in friendly, conversational Hinglish (Latin script)."
-
-        insight_prompt = (
-            f"You are a knowledgeable India e-commerce shopping assistant.\n"
-            f"User asked: \"{query}\"\n\n"
-            f"Actual products found (live Indian prices):\n\n"
-            f"{products_text}\n\n"
-            f"Write a SHORT, DIRECT comparison answer (3-5 sentences). Rules:\n"
-            f"- Reference actual product names and prices from the data\n"
-            f"- Directly answer what the user asked (camera/gaming/value/etc.)\n"
-            f"- Give a clear winner recommendation with reason\n"
-            f"- Conversational tone, no markdown, no bullet points\n"
-            f"{lang_note}\n"
-            f"- Do NOT say \"based on the data\" or \"I found\" — just answer directly"
-        )
-        insight = _llm_insight(insight_prompt, max_tokens=250)
+        names = []
+        for brand in brands[:2]:
+            plist = brands_data.get(brand) or []
+            if plist:
+                names.append(f"{plist[0].get('title')} ({plist[0].get('price_inr', '')})")
+        if names:
+            insight = "Comparing the shown options, " + " vs ".join(names) + "."
         print(f"[ResponseBuilder] insight generated ({len(insight)} chars)")
 
     # ── Build clean response — no clutter ────────────────────────────────────
@@ -270,7 +264,7 @@ def _pairing_response(products: list, ents: dict, query: str) -> str:
         'sneakers': "White sneakers are the most versatile — they work with almost any outfit.",
     }
     tip = style_tips.get(pairing_item, "Choose neutral or complementary tones for a put-together look.")
-    text += f"💡 **Style tip:** {tip}"
+    text += f"💡 Style tip: {tip}"
 
     return text
 
@@ -281,25 +275,42 @@ def _single_best_response(products: list, ents: dict, query: str, language: str 
     price   = _price_s(ents)
     brands  = ents.get('brands', [])
     brand_s = f" from {brands[0]}" if brands else ""
+    wants_lowest = bool(ents.get('wants_lowest_price')) or bool(re.search(r'\b(?:cheapest|lowest\s*price|most\s*affordable|least\s*expensive|sasta|saste|kam\s*daam)\b', query, re.I))
 
     if not products:
         if language == 'hi':
-            return f"मुझे अभी **{dept}**{price}{brand_s} के लिए सही विकल्प नहीं मिला। कृपया बजट या फ़िल्टर बदलकर दोबारा प्रयास करें।"
+            return f"मुझे अभी {dept}{price}{brand_s} के लिए सही विकल्प नहीं मिला। कृपया बजट या फ़िल्टर बदलकर दोबारा प्रयास करें।"
         return (
-            f"I couldn't find a top pick for **{dept}**{price}{brand_s} right now.\n\n"
+            f"I couldn't find a top pick for {dept}{price}{brand_s} right now.\n\n"
             f"Try:\n"
             f"- Removing the budget filter\n"
-            f"- Using a broader category — e.g. *\"best phone under ₹20,000\"*"
+            f"- Using a broader category — e.g. \"best phone under ₹20,000\""
         )
 
-    best = products[0]
+    # If user wants the cheapest, sort to guarantee lowest priced
+    if wants_lowest:
+        priced_items = [p for p in products if (p.get('price_num') or 0) > 0]
+        if priced_items:
+            best = min(priced_items, key=lambda p: p.get('price_num') or 999999)
+        else:
+            best = products[0]
+    else:
+        best = products[0]
+
     rating_s = f" | ⭐ {best['rating']}" if best.get('rating') else ""
 
+    if wants_lowest:
+        if language == 'hi':
+            return f"सबसे सस्ता उपलब्ध विकल्प {best['title']} है, जिसकी कीमत {best['price_inr']}{rating_s} है।"
+        elif language == 'hinglish':
+            return f"Sabse sasta available option {best['title']} hai jo {best['price_inr']}{rating_s} mein available hai."
+        return f"The cheapest available option is {best['title']} priced at {best['price_inr']}{rating_s}."
+
     if language == 'hi':
-        return f"आपके लिए मेरी शीर्ष सिफारिश **{best['title']}** है, जिसकी कीमत **{best['price_inr']}**{rating_s} है।"
+        return f"आपके लिए मेरी शीर्ष सिफारिश {best['title']} है, जिसकी कीमत {best['price_inr']}{rating_s} है।"
     elif language == 'hinglish':
-        return f"Aapke liye meri top recommendation **{best['title']}** hai jo **{best['price_inr']}**{rating_s} mein available hai."
-    return f"My top recommendation for you is the **{best['title']}** priced at **{best['price_inr']}**{rating_s}."
+        return f"Aapke liye meri top recommendation {best['title']} hai jo {best['price_inr']}{rating_s} mein available hai."
+    return f"My top recommendation for you is the {best['title']} priced at {best['price_inr']}{rating_s}."
 
 
 # ── Listing response ───────────────────────────────────────────────────────────
@@ -312,6 +323,8 @@ def _listing_response(products: list, ents: dict, intent: str, query: str = "", 
     n       = len(products)
     brand_s = f"by {brands[0]}" if brands else ""
     color_s = f"in {color}" if color else ""
+    wants_lowest = bool(ents.get('wants_lowest_price')) or bool(re.search(r'\b(?:cheapest|lowest\s*price|most\s*affordable|least\s*expensive|sasta|saste|kam\s*daam)\b', query, re.I))
+    max_price = ents.get('max_price')
 
     icons = {
         'price_filter':     '💰',
@@ -325,77 +338,94 @@ def _listing_response(products: list, ents: dict, intent: str, query: str = "", 
 
     if not products:
         if language == 'hi':
-            return "आपके मापदंडों से मेल खाने वाला कोई उत्पाद नहीं मिला। कृपया बजट या फ़िल्टर थोड़ा बढ़ाकर खोजें।"
-        return (
-            "No suitable exact product found that meets all your criteria.\n\n"
-            "Try:\n"
-            "- Broadening your budget filter\n"
-            "- Removing specific constraint filters (such as brand, color, or exact specs)"
+            return "मुझे आपके द्वारा मांगे गए सटीक उत्पाद नहीं मिले। कृपया बजट या फ़िल्टर थोड़ा बदलकर दोबारा प्रयास करें।"
+
+        # Build a context-aware message based on what was understood
+        understood_parts = []
+        if brands:
+            understood_parts.append(f"brand: {brands[0]}")
+        if ents.get('gender'):
+            understood_parts.append(f"gender: {ents['gender']}'s")
+        if dept and dept != 'products':
+            understood_parts.append(f"category: {dept}")
+        if max_price:
+            understood_parts.append(f"budget: under ₹{max_price:,}")
+
+        understood_str = (
+            f" (understood: {', '.join(understood_parts)})" if understood_parts else ""
         )
 
-    # ── Handle Smart Alternative Responses (Phase 3) ──────────────────────────
+        # Suggest a broader retry query
+        retry_hint = dept if dept and dept != 'products' else 'clothing'
+        brand_hint = f"{brands[0]} " if brands else ""
+
+        return (
+            f"I couldn't find matching products right now{understood_str}.\n\n"
+            f"Try:\n"
+            f"- Broader search: \"{brand_hint}{retry_hint}\" without extra filters\n"
+            f"- Or rephrase: e.g. \"{brand_hint}men's {retry_hint}\" or \"{brand_hint}best {retry_hint}\""
+        )
+
+
+    # ── Check if requested budget is exceeded by all products or budget_relaxed alternative ───
+    budget_alts = [p for p in products if p.get('alternative_type') == 'budget_relaxed']
+    priced_prods = [p for p in products if (p.get('price_num') or 0) > 0]
+    all_over_budget = max_price and priced_prods and all((p.get('price_num') or 0) > max_price for p in priced_prods)
+
+    if budget_alts or all_over_budget:
+        best_b = budget_alts[0] if budget_alts else min(priced_prods, key=lambda p: p.get('price_num') or 999999)
+        orig_b = int(best_b.get('original_budget') or max_price or 0)
+        lowest_p = int(best_b.get('lowest_matching_price') or best_b.get('price_num') or 0)
+        diff = int(best_b.get('budget_diff') or (lowest_p - orig_b if lowest_p > orig_b else 0))
+
+        if language == 'hi':
+            if orig_b and lowest_p and diff > 0:
+                return f"₹{orig_b:,} के तहत कोई सटीक उत्पाद नहीं मिला। सबसे कम कीमत वाला मेल खाने वाला विकल्प ₹{lowest_p:,} है, इसलिए आपको अपना बजट ₹{diff:,} बढ़ाना पड़ सकता है।"
+            else:
+                return f"मुझे आपके बजट के तहत कोई सटीक उत्पाद नहीं मिला। निकटतम उत्पाद {best_b.get('price_inr', '')} से शुरू होता है।"
+        else:
+            if orig_b and lowest_p and diff > 0:
+                return (
+                    f"No exact match was found under ₹{orig_b:,}. "
+                    f"The lowest-priced matching option I found is ₹{lowest_p:,}, "
+                    f"so you may need to increase your budget by ₹{diff:,}."
+                )
+            elif orig_b and lowest_p:
+                return (
+                    f"I couldn't find an exact match under ₹{orig_b:,}. "
+                    f"The closest matching product starts at ₹{lowest_p:,}. "
+                    f"You may need to increase your budget to ₹{lowest_p:,}."
+                )
+
+    # ── Handle Other Smart Alternative Responses (Phase 3 Spec Relaxation) ────
     if any(p.get('is_alternative') for p in products):
-        budget_alts = [p for p in products if p.get('alternative_type') == 'budget_relaxed']
         spec_alts = [p for p in products if p.get('alternative_type') == 'spec_relaxed']
-        
-        lines = []
-        query_clean = query.strip()
-        lines.append(f"I couldn't find an exact match for **\"{query_clean}\"** under your requested budget.")
-        lines.append("")
-        
-        if budget_alts:
-            best_b = budget_alts[0]
-            lines.append(f"**Closest match:** **{best_b['price_inr']}** *({best_b.get('alternative_diff', '')})*")
-            lines.append(f"• **{best_b['title']}**")
-            lines.append(f"That's the lowest-priced option matching your requested specifications.")
-            lines.append("")
-            
         if spec_alts:
             best_s = spec_alts[0]
-            lines.append(f"**In-budget alternative:** **{best_s['price_inr']}**")
-            lines.append(f"• **{best_s['title']}**")
-            lines.append(f"*{best_s.get('alternative_explanation', '')}*")
-            lines.append("")
+            explanation = best_s.get('alternative_explanation') or best_s.get('alternative_diff', '')
+            return f"Here is a recommended in-budget pick: {best_s['title']} at {best_s['price_inr']} ({explanation})"
 
-        return '\n'.join(lines).strip()
+    # If lowest price is requested, identify the lowest priced and next affordable options
+    if wants_lowest and products:
+        priced_prods = [p for p in products if (p.get('price_num') or 0) > 0]
+        if priced_prods:
+            priced_prods.sort(key=lambda p: p.get('price_num') or 999999)
+            cheapest = priced_prods[0]
+            extra_c = f" Another affordable option is {priced_prods[1]['title']} at {priced_prods[1].get('price_inr', '')}." if len(priced_prods) > 1 else ""
+            if language == 'hi':
+                return f"सबसे सस्ता {dept} विकल्प {cheapest['title']} है जो {cheapest.get('price_inr', '')} पर उपलब्ध है।{extra_c}"
+            return f"The cheapest {dept} available is {cheapest['title']} priced at {cheapest.get('price_inr', '')}.{extra_c}"
 
-    # Generate LLM insight from real product data when a user query is present
-    insight = ""
-    if query and products:
-        top_items = []
-        for p in products[:4]:
-            title   = p.get('title', '')
-            price_v = p.get('price_inr', '')
-            rating  = p.get('rating', '')
-            top_items.append(f"- {title} | {price_v}" + (f" | ⭐{rating}" if rating else ""))
-        products_text = "\n".join(top_items)
-
-        lang_note = ""
-        if language == 'hi':
-            lang_note = "- Write the answer in natural Hindi (Devanagari script), keeping prices in ₹ format."
-        elif language == 'hinglish':
-            lang_note = "- Write the answer in friendly Hinglish (Latin script)."
-
-        insight_prompt = (
-            f"You are a helpful India e-commerce assistant.\n"
-            f"User asked: \"{query}\"\n\n"
-            f"Top products found (live Indian prices):\n{products_text}\n\n"
-            f"Write 2-3 SHORT sentences that directly answer the user's query.\n"
-            f"- Mention 1-2 specific product names and prices\n"
-            f"- Give a concrete recommendation\n"
-            f"- Conversational tone, ₹ for prices, no markdown, no bullet points\n"
-            f"{lang_note}\n"
-            f"- Do NOT start with \"Based on\" or \"I found\" — answer directly"
-        )
-        insight = _llm_insight(insight_prompt, max_tokens=180)
-
-    if insight:
-        result = insight
+    # Fast listing copy
+    best = products[0]
+    extra = f" A strong next option is {products[1]['title']} at {products[1].get('price_inr', '')}." if len(products) > 1 else ""
+    if language == 'hi':
+        result = f"आपके मापदंडों के अनुसार {best['title']} {best.get('price_inr', '')} पर उपलब्ध है।"
     else:
-        if language == 'hi':
-            result = "यहाँ आपके बजट और पसंद के अनुसार सबसे अच्छे विकल्प दिए गए हैं:"
-        else:
-            result = "Here are the top matches matching your specifications and budget:"
+        result = (
+            f"Here are live matches for your request. "
+            f"{best['title']} is priced at {best.get('price_inr', '')}.{extra}"
+        )
     return result
 
 
@@ -419,17 +449,17 @@ def _multi_item_response(products_by_label: dict, ents: dict) -> tuple[str, list
         if prods:
             best = prods[0]
             rating_s = f" ⭐ {best['rating']}" if best.get('rating') else ''
-            lines.append(f"**{label}**")
-            lines.append(f"• {best['title']} — **{best['price_inr']}**{rating_s}")
+            lines.append(f"{label}")
+            lines.append(f"• {best['title']} — {best['price_inr']}{rating_s}")
             if len(prods) > 1:
-                lines.append(f"  *(+ {len(prods)-1} more below)*")
+                lines.append(f"  (+ {len(prods)-1} more below)")
             all_cards.extend(prods[:2])
         else:
-            lines.append(f"**{label}** — No results found.")
+            lines.append(f"{label} — No results found.")
         lines.append("")
 
     lines.append("Mix neutral tones for one piece and let the other be the statement item.")
-    return '\n'.join(lines), all_cards
+    return _strip_markdown_bold('\n'.join(lines)), all_cards
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -454,7 +484,7 @@ def build_response(
     # ── Information (no product cards) ────────────────────────────────────────
     if intent == 'information':
         text = _information_response_llm(llm_explanation, query)
-        return text, []
+        return _strip_markdown_bold(text), []
 
     # ── Info only (legacy fallback — kept for backward compat) ────────────────
     if intent == 'info_only':
@@ -462,34 +492,39 @@ def build_response(
         count = ents.get('count')
         if count and isinstance(count, int):
             products = products[:count]
-        return text, products
+        return _strip_markdown_bold(text), products
 
     # ── Comparison ────────────────────────────────────────────────────────────
     if intent == 'comparison':
         if brands_data:
             # search_required=True path: real product data available
-            return _comparison_response(brands_data, ents, query, language=language)
+            text, prods = _comparison_response(brands_data, ents, query, language=language)
+            return _strip_markdown_bold(text), prods
         else:
             # search_required=False path: text-only comparison
             text = _comparison_text_response(llm_explanation, ents, query)
-            return text, []
+            return _strip_markdown_bold(text), []
 
     # ── Multi-item (jeans + t-shirt + sneakers) ───────────────────────────────
     if intent == 'multi_item' and brands_data:
-        return _multi_item_response(brands_data, ents)
+        text, prods = _multi_item_response(brands_data, ents)
+        return _strip_markdown_bold(text), prods
 
     # ── Single best ───────────────────────────────────────────────────────────
     if intent == 'single_best':
-        return _single_best_response(products, ents, query, language=language), products[:1]
+        text = _single_best_response(products, ents, query, language=language)
+        return _strip_markdown_bold(text), products[:1]
 
     # ── Fashion pairing ───────────────────────────────────────────────────────
     if intent == 'pairing':
-        return _pairing_response(products, ents, query), products
+        text = _pairing_response(products, ents, query)
+        return _strip_markdown_bold(text), products
 
     # ── Respect explicit count for listing intents ────────────────────────────
     count = ents.get('count')
-    if count and isinstance(count, int):
+    if count and isinstance(count, int) and count > 1:
         products = products[:count]
 
     # ── All other listing intents ─────────────────────────────────────────────
-    return _listing_response(products, ents, intent, query=query, language=language), products
+    text = _listing_response(products, ents, intent, query=query, language=language)
+    return _strip_markdown_bold(text), products

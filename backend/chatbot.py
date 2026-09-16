@@ -45,6 +45,23 @@ _PRODUCT_FETCH_RE = re.compile(
     re.I,
 )
 
+# Explicit single product request detector (user clearly wants exactly one best choice)
+_SINGLE_PRODUCT_RE = re.compile(
+    r'\b(?:1|one)\s+(?:best|top|option|product|choice|recommendation|pick)\b'
+    r'|\b(?:suggest|recommend|give|show|find|pick)\s+(?:me\s+)?(?:just\s+|only\s+)?(?:1|one)\b'
+    r'|\b(?:only|just)\s+(?:1|one)\b'
+    r'|\brecommend\s+(?:me\s+)?(?:1|one)\b'
+    r'|\b(?:give\s+me|find\s+me|show\s+me|tell\s+me|what\s+is|what\'s)\s+(?:the\s+)?(?:single\s+best|absolute\s+best|#1|number\s+one)\b'
+    r'|\b(?:give\s+me|what\s+is|what\'s)\s+the\s+best\s+(?:\w+\s+)?(?:under|below|for|in)?\b'
+    r'|\bthe\s+(?:single\s+best|only\s+one|best\s+one)\b'
+    r'|\bwhich\s+one\s+(?:should\s+i|to|shall\s+i)?\s*(?:buy|choose|pick|get)\b'
+    r'|\bwhich\s+one\s+(?:is\s+best|is\s+better|do\s+you\s+recommend)\b'
+    r'|\bpick\s+(?:the\s+best\s+one|one)\s+for\s+me\b'
+    r'|\bwhich\s+is\s+the\s+best\s+one\b'
+    r'|\b(?:ek\s+hi|ek\s+best|sirf\s+ek|kaunsa\s+ek)\b',
+    re.I
+)
+
 
 class ShopBot:
     """Per-session India e-commerce chatbot."""
@@ -55,6 +72,7 @@ class ShopBot:
     def __init__(self):
         self.history: list[dict] = []
         self.conversation_mgr = ConversationManager()
+        self.last_products: list[dict] = []
 
     # ── Public ─────────────────────────────────────────────────────────────────
     def chat(self, user_msg: str, language: str = 'auto') -> dict:
@@ -77,7 +95,14 @@ class ShopBot:
         context, qu, effective_q = self.conversation_mgr.process_turn(qu_input)
         print(f"[Bot] Raw: {user_msg!r} [lang={effective_lang}] -> Effective Q: {effective_q!r}")
 
-        search_query_seed = effective_q
+        shown_answer = self._try_answer_about_shown_products(user_msg, effective_lang)
+        if shown_answer is not None:
+            return shown_answer
+
+        if effective_q == qu_input and getattr(qu, 'normalized_query', None):
+            search_query_seed = qu.normalized_query
+        else:
+            search_query_seed = effective_q
 
         # ── Clarification gate ─────────────────────────────────────────────────
         llm = None
@@ -113,9 +138,30 @@ class ShopBot:
                     'language':         effective_lang,
                 }
 
-        # ── STEP 0b: LLM reasoning ──────────────────────────────────────────
+        # Skip the Groq understanding call for already-clear shopping queries
         if llm is None:
-            llm = llm_reason(effective_q, language=effective_lang)
+            qu_ready = (
+                not qu.needs_clarification
+                and qu.intent in ('recommendation', 'product_search')
+                and qu.search_required
+                and (qu.category or qu.audio_type)
+            )
+            if qu_ready:
+                print("[Bot] Skipping LLM reason — query already understood by QU.")
+                llm = {
+                    'intent': qu.intent,
+                    'canonical_intent': qu.intent,
+                    'search_required': True,
+                    'explanation': '',
+                    'items': [],
+                    'count': None,
+                    'features': {},
+                    'vague_expansions': [],
+                    'search_queries': [],
+                    'confidence': 0.9,
+                }
+            else:
+                llm = llm_reason(effective_q, language=effective_lang)
         explanation = llm.get('explanation', '')
 
         # ── STEP 1: NLU ──────────────────────────────────────────────────────
@@ -128,6 +174,12 @@ class ShopBot:
 
         # ── STEP 1b: Merge LLM enrichments (LOWEST PRIORITY) ──────────────────
         ents = self._merge_llm_into_ents(ents, llm, queries)
+
+        # Rebuild search strings after QU/LLM slots are merged (gender, fabric, use-case)
+        from src.nlu_engine import build_search_queries
+        rebuilt = build_search_queries(search_query_seed, nlu.get('intent', 'product_search'), ents)
+        if rebuilt:
+            queries = rebuilt
 
         # ── STEP 2: Resolve final intent + search_required ─────────────────────
         intent, search_required = self._resolve_intent_and_search(
@@ -172,8 +224,10 @@ class ShopBot:
                     products.extend(prods)
 
             elif intent in ('recommendation', 'product_search'):
+                is_single = self._is_single_product_intent(user_msg, ents, nlu, llm)
                 nlu_intent_raw = nlu.get('intent', '')
-                if nlu_intent_raw == 'single_best':
+
+                if is_single or nlu_intent_raw == 'single_best':
                     prods    = fetch_one(queries[0]['query'] if queries else search_query_seed, ents, top_n=3)
                     products = prods[:1]
                     intent   = 'single_best'
@@ -188,12 +242,17 @@ class ShopBot:
                         products.extend(prods)
                     intent = 'multi_item'
                 else:
+                    target_count = ents.get('count')
+                    if not target_count or not isinstance(target_count, int) or target_count <= 1:
+                        target_count = DEFAULT_COUNT
                     if queries:
-                        products = fetch_one(queries[0]['query'], ents, top_n=DEFAULT_COUNT)
+                        products = fetch_one(queries[0]['query'], ents, top_n=target_count)
+                    else:
+                        products = fetch_one(search_query_seed, ents, top_n=target_count)
 
             else:
-                if queries:
-                    products = fetch_one(queries[0]['query'], ents, top_n=DEFAULT_COUNT)
+                q_str = queries[0]['query'] if queries else search_query_seed
+                products = fetch_one(q_str, ents, top_n=DEFAULT_COUNT)
 
             # ── STEP 4: Build response ─────────────────────────────────────────
             text, cards = build_response(
@@ -202,11 +261,18 @@ class ShopBot:
                 language=effective_lang,
             )
 
+        # ── Strip any residual markdown ** bold from final response ───────────
+        if text:
+            text = re.sub(r'\*\*(.*?)\*\*', r'\1', text).replace('**', '')
+
         # ── STEP 5: Update history ─────────────────────────────────────────────
         self._push('user',      user_msg, intent, ents)
         self._push('assistant', text,     intent, {})
 
-        # ── Persist intent to context for follow-up routing ────────────────────
+        # ── Persist last shown products for material / which-one follow-ups ──
+        if cards:
+            self.last_products = list(cards)
+            self.conversation_mgr.context.last_products = list(cards)
         context.last_intent = intent
         if intent == 'comparison':
             cmp_brands = list(ents.get('brands', []))
@@ -263,8 +329,223 @@ class ShopBot:
     def clear(self):
         self.history.clear()
         self.conversation_mgr.context.clear()
+        self.last_products = []
 
-    # ── Private ────────────────────────────────────────────────────────────────
+    def _is_single_product_intent(
+        self, user_msg: str, ents: dict, nlu: dict, llm: dict
+    ) -> bool:
+        """
+        Determines whether the user clearly requested ONE specific product/choice
+        or is asking for recommendations/options where multiple products should be returned.
+        """
+        msg = (user_msg or '').strip()
+        if not msg:
+            return False
+
+        # 1. Regex check for explicit single request (e.g. "give me the best laptop", "which one to buy", "recommend 1")
+        if _SINGLE_PRODUCT_RE.search(msg):
+            return True
+
+        # 2. NLU detected single_best
+        if nlu.get('intent') == 'single_best':
+            return True
+
+        # 3. Explicit count of 1 in entities only if explicitly stated by user
+        count = ents.get('count')
+        if count == 1 and bool(re.search(r'\b(?:1|one|only\s+one|just\s+one|single)\b', msg, re.I)):
+            return True
+
+        return False
+
+    _SHOWN_PRODUCT_RE = re.compile(
+        r'\b(?:which\s+one|which\s+product|this\s+(?:one|shoe|product|shirt|item)|'
+        r'these\s+(?:ones|products|shoes)|the\s+(?:first|second|third)\s+one|'
+        r'better\s+for|is\s+this\s+cotton|made\s+of|material|fabric|upper\s+material|'
+        r'tell\s+me\s+about\s+(?:the\s+)?material|better\s+material|abs\s+plastic|aluminum|what\s+this\s+means)\b',
+        re.I,
+    )
+    _MATERIAL_Q_RE = re.compile(
+        r'\b(?:material|fabric|made\s+of|cotton|upper\s+material|build|abs\s+plastic|aluminum|aluminium|what\s+this\s+means)\b',
+        re.I,
+    )
+
+    def _try_answer_about_shown_products(self, user_msg: str, language: str) -> dict | None:
+        """Answer follow-ups about currently displayed product cards or material questions without a new live search."""
+        products = self.last_products or self.conversation_mgr.context.last_products
+        is_material = bool(self._MATERIAL_Q_RE.search(user_msg))
+
+        # Check if query is an explanation about ABS Plastic / Aluminum or other materials
+        q_lower = user_msg.lower()
+        if is_material and re.search(r'\b(?:abs\s+plastic|aluminum|aluminium|what\s+this\s+means|properties\s+of)\b', q_lower):
+            text = self._answer_material_question(user_msg, products or [])
+            intent = 'information'
+            text = re.sub(r'\*\*(.*?)\*\*', r'\1', text).replace('**', '')
+            self._push('user', user_msg, intent, {})
+            self._push('assistant', text, intent, {})
+            self.conversation_mgr.context.last_intent = intent
+            return {
+                'answer':          text,
+                'intent':          intent,
+                'search_required': False,
+                'entities':        {},
+                'products':        products or [],
+                'language':        language,
+            }
+
+        # If user asks about "this shoe" / "this product" / "made of" but no cards are currently displayed
+        if not products and is_material and re.search(r'\b(?:this|these|the)\s+(?:one|shoe|shirt|product|item|ones|shoes|shirts|products|items)\b|\bwhat\s+material\s+is\s+this\b|\bwhat\s+is\s+this\s+made\s+of\b', q_lower):
+            text = "There are no products currently shown on your screen to inspect. Please search for a product or category first (e.g. running shoes or formal blazers), and I will gladly provide its material and build details."
+            intent = 'information'
+            self._push('user', user_msg, intent, {})
+            self._push('assistant', text, intent, {})
+            self.conversation_mgr.context.last_intent = intent
+            return {
+                'answer':          text,
+                'intent':          intent,
+                'search_required': False,
+                'entities':        {},
+                'products':        [],
+                'language':        language,
+            }
+
+        if not products or not self._SHOWN_PRODUCT_RE.search(user_msg):
+            return None
+
+        if is_material:
+            text = self._answer_material_question(user_msg, products)
+        else:
+            text = self._answer_which_shown_product(user_msg, products)
+
+        intent = 'information'
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text).replace('**', '')
+        self._push('user', user_msg, intent, {})
+        self._push('assistant', text, intent, {})
+        self.conversation_mgr.context.last_intent = intent
+        return {
+            'answer':          text,
+            'intent':          intent,
+            'search_required': False,
+            'entities':        {},
+            'products':        products,
+            'language':        language,
+        }
+
+    def _product_material_rows(self, product: dict) -> list[dict]:
+        from src.material_analyzer import get_card_materials
+        return get_card_materials(
+            title=product.get('title') or '',
+            category=product.get('category'),
+            brand=product.get('brand'),
+            description=product.get('description') or '',
+        )
+
+    def _format_material_rows(self, rows: list[dict], limit: int = 4) -> str:
+        bits = []
+        for row in rows[:limit]:
+            part = (row.get('part') or 'Part').strip()
+            mat = (row.get('material') or '').strip()
+            if mat:
+                bits.append(f"{part}: {mat}")
+        return '; '.join(bits)
+
+    def _answer_material_question(self, user_msg: str, products: list[dict]) -> str:
+        q = user_msg.lower()
+
+        # Material explanation questions (e.g. ABS plastic, aluminum, blazer context)
+        if re.search(r'\b(?:abs\s+plastic|aluminum|aluminium)\b', q) or re.search(r'\bwhat\s+this\s+means\b', q):
+            return (
+                "ABS plastic (Acrylonitrile Butadiene Styrene) is a rigid, impact-resistant thermoplastic polymer known for its lightweight strength, durability, and resistance to scratches and drops. "
+                "Aluminum is a lightweight, corrosion-resistant metal that provides high structural rigidity, sleek aesthetics, and excellent heat dissipation. "
+                "When used for the main body of a product, this combination provides a tough, impact-absorbing outer shell with rigid structural reinforcement. "
+                "If this specification appears under an apparel listing such as a formal blazer, it typically refers to structural hardware (such as buttons, zippers, or internal garment stays) or is an e-commerce catalog specification error, as blazers are primarily constructed from fabrics like cotton, polyester, rayon, or wool blends."
+            )
+
+        asking_compare = bool(re.search(r'\b(?:which|better|compare)\b', q))
+        asking_cotton = bool(re.search(r'\bcotton\b', q))
+        asking_upper = bool(re.search(r'\bupper\b', q))
+
+        if asking_compare and len(products) >= 2:
+            lines = ["Here is the material information from the products on your cards:"]
+            for i, p in enumerate(products[:4], 1):
+                rows = self._product_material_rows(p)
+                detail = self._format_material_rows(rows) or "no material details listed on the card"
+                lines.append(f"{i}. {p.get('title', 'Product')} — {detail}.")
+            lines.append("I am only using the material information already available for these listings, not extra guesses.")
+            return ' '.join(lines)
+
+        target = products[0] if products else {}
+        if re.search(r'\bsecond\b', q) and len(products) > 1:
+            target = products[1]
+        elif re.search(r'\bthird\b', q) and len(products) > 2:
+            target = products[2]
+        else:
+            # Check if user mentioned product title words in query
+            for p in products:
+                title_words = [w for w in (p.get('title') or '').lower().split() if len(w) > 3]
+                if any(w in q for w in title_words[:4]):
+                    target = p
+                    break
+
+        if not target:
+            return "No matching product card is currently available to inspect material details."
+
+        rows = self._product_material_rows(target)
+        title = target.get('title') or 'This product'
+        if asking_cotton:
+            blob = ' '.join(
+                f"{r.get('part','')} {r.get('material','')} {r.get('description','')}"
+                for r in rows
+            ).lower() + ' ' + title.lower()
+            if 'cotton' in blob:
+                return f"Yes — {title} lists cotton in its material information ({self._format_material_rows(rows) or 'cotton mentioned in the listing'})."
+            return (
+                f"The card for {title} does not confirm cotton. "
+                f"Available material info: {self._format_material_rows(rows) or 'none listed on the card'}."
+            )
+
+        if asking_upper:
+            upper = next((r for r in rows if 'upper' in (r.get('part') or '').lower()), None)
+            if upper:
+                return f"The upper on {title} is listed as {upper.get('material')}."
+            titled = [r for r in rows if r.get('source') == 'title']
+            if titled:
+                return f"The listing for {title} mentions {self._format_material_rows(titled)}, but does not name a separate upper material."
+            return f"No separate upper material is listed for {title}. Available: {self._format_material_rows(rows) or 'none on the card'}."
+
+        if not rows:
+            return f"I don't have material & build details on the card for {title}, so I won't invent them."
+        return f"{title} — {self._format_material_rows(rows)}."
+
+    def _answer_which_shown_product(self, user_msg: str, products: list[dict]) -> str:
+        q = user_msg.lower()
+        use = None
+        if re.search(r'\brun(?:ning)?\b', q):
+            use = 'running'
+        elif re.search(r'\boffice|work|formal\b', q):
+            use = 'office'
+        elif re.search(r'\bcollege|campus|school\b', q):
+            use = 'college'
+
+        scored = []
+        for p in products:
+            title = (p.get('title') or '').lower()
+            score = float(p.get('rating') or 0)
+            if use == 'running' and re.search(r'\brun|sport|mesh|sneaker|trainer\b', title):
+                score += 2
+            if use == 'office' and re.search(r'\bformal|office|trouser|chino|shirt\b', title):
+                score += 2
+            if use == 'college' and re.search(r'\bcasual|backpack|sneaker|hoodie\b', title):
+                score += 2
+            scored.append((score, p))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best = scored[0][1]
+        others = ', '.join(p.get('title', 'product') for _, p in scored[1:3]) if len(scored) > 1 else ''
+        use_bit = f" for {use}" if use else ""
+        extra = f" Compared with {others}." if others else ""
+        return (
+            f"Of the products currently shown, {best.get('title')} at {best.get('price_inr', '')} "
+            f"is the better pick{use_bit}.{extra}"
+        )
 
     def _resolve_intent_and_search(
         self, llm: dict, qu: 'QueryUnderstanding', nlu: dict, user_msg: str, ents: dict
@@ -301,24 +582,17 @@ class ShopBot:
                 return 'information', False
 
             if qu_intent == 'comparison':
-                # Comparison queries without price/search signals do NOT require live product search
-                has_search_trigger = (
-                    qu.price.get('max') is not None
-                    or bool(re.search(r'\b(?:show|find|buy|price|under|below|get|products?|listings?)\b', user_msg, re.I))
-                )
-                if has_search_trigger:
-                    search_req = True
-                elif llm_canonical == 'comparison' and llm_search is not None and conf >= 0.70 and has_search_trigger:
-                    search_req = llm_search
-                else:
-                    search_req = qu_search if qu_search is not None else False
-                print(f"[Bot] QU comparison → search_required={search_req}")
-                return 'comparison', search_req
+                # Unless user explicitly requested no products / text-only, comparisons fetch real products
+                if _NO_SEARCH_RE.search(user_msg):
+                    print(f"[Bot] QU comparison with explicit no-search -> text only.")
+                    return 'comparison', False
+                print(f"[Bot] QU comparison -> search_required=True")
+                return 'comparison', True
 
         # ── Priority 3: LLM when conf >= 0.65 ────────────────────────────────────
         if llm_canonical and conf >= 0.65:
             if llm_canonical == 'comparison':
-                search_req = False if not (qu.price.get('max') is not None or bool(re.search(r'\b(?:show|find|buy|price|under|below|get|products?|listings?)\b', user_msg, re.I))) else (llm_search or False)
+                search_req = False if _NO_SEARCH_RE.search(user_msg) else True
             else:
                 search_req = llm_search if llm_search is not None else (llm_canonical != 'information')
             print(f"[Bot] LLM intent={llm_canonical!r} search_required={search_req} (conf={conf:.2f})")
@@ -418,17 +692,18 @@ class ShopBot:
             messages = [{"role": "system", "content": system_prompt}] + history_msgs + [{"role": "user", "content": user_content}]
 
             resp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-20b",
                 messages=messages,
-                temperature=0.35,
+                temperature=0.3,
                 max_tokens=max_tok,
-                timeout=6.0,
+                timeout=8.0,
             )
             ans = resp.choices[0].message.content.strip()
+            ans = re.sub(r'\*\*(.*?)\*\*', r'\1', ans).replace('**', '')
             nudge = (
-                "\n\n↪ *Want me to search for actual products with live ₹ prices? Just ask!*"
+                "\n\n↪ Want me to search for actual products with live ₹ prices? Just ask!"
                 if intent == 'comparison'
-                else "\n\n↪ *Want me to find or compare actual products? Just ask!*"
+                else "\n\n↪ Want me to find or compare actual products? Just ask!"
             )
             return ans + nudge
 
@@ -440,11 +715,19 @@ class ShopBot:
             return (
                 "Both are strong options depending on your specific needs. "
                 "For a detailed comparison with live prices, try asking: "
-                "*\"Compare [Brand A] vs [Brand B] under ₹X\"*"
+                "\"Compare [Brand A] vs [Brand B] under ₹X\""
+            )
+        q_low = query.lower()
+        if 'abs' in q_low or 'plastic' in q_low or 'aluminum' in q_low or 'blazer' in q_low:
+            return (
+                "ABS plastic (Acrylonitrile Butadiene Styrene) is a rigid, impact-resistant thermoplastic polymer known for durability, lightness, and scratch resistance. "
+                "Aluminum is a lightweight, corrosion-resistant metal that provides strong structural rigidity and sleek aesthetics. "
+                "When used for the main body of a product, this combination delivers a sturdy, impact-absorbing outer shell with lightweight structural support. "
+                "If this appears under a garment listing like a formal blazer, it typically refers to structural hardware (buttons, zippers, or frame) or is an e-commerce catalog error, as blazers are made from fabrics such as cotton, polyester, or wool blends."
             )
         return (
-            "That's a great question! For specific product help, ask me to **find**, "
-            "**recommend**, or **compare** — I'll pull live Indian store results with ₹ prices."
+            "That's a great question! For specific product help, ask me to find, "
+            "recommend, or compare — I'll pull live Indian store results with ₹ prices."
         )
 
 
@@ -595,11 +878,27 @@ class ShopBot:
                 'air conditioner': ('Air Conditioners', 'Home_and_Kitchen'),
                 'television':      ('Televisions', 'Electronics'),
                 'bag':             ('Bags', 'Clothing_Shoes_and_Jewelry'),
+                'office wear':     ('Office Wear', 'Clothing_Shoes_and_Jewelry'),
+                'clothing':        ('Clothing', 'Clothing_Shoes_and_Jewelry'),
+                'trouser':         ('Trousers', 'Clothing_Shoes_and_Jewelry'),
+                'hoodie':          ('Sweatshirts', 'Clothing_Shoes_and_Jewelry'),
+                'jacket':          ('Jackets', 'Clothing_Shoes_and_Jewelry'),
+                'kurta':           ('Ethnic Wear', 'Clothing_Shoes_and_Jewelry'),
+                'dress':           ('Dresses', 'Clothing_Shoes_and_Jewelry'),
             }
             if qu.category in _GENERIC_DEPT_MAP:
-                dept, cat = _GENERIC_DEPT_MAP[qu.category]
+                dept, amazon_cat = _GENERIC_DEPT_MAP[qu.category]
                 ents['dept'] = dept
-                ents['category'] = cat
+                ents['amazon_category'] = amazon_cat
+                ents['category'] = qu.category
+                print(f"[Bot] QU category={qu.category!r} dept={dept!r} applied to ents")
+            else:
+                ents['category'] = qu.category
+
+        # Gender — QU detection is authoritative
+        if getattr(qu, 'gender', None):
+            ents['gender'] = qu.gender
+            print(f"[Bot] QU gender={qu.gender!r} applied to ents")
 
         # Brand — QU brand registry and fuzzy matching is authoritative
         if qu.brands:
@@ -624,6 +923,10 @@ class ShopBot:
             tech_specs = ents.setdefault('tech_specs', {})
             for spec, val in qu.specifications.items():
                 tech_specs[spec] = val
+            if 'material' in qu.specifications:
+                mats = ents.setdefault('materials', [])
+                if qu.specifications['material'] not in mats:
+                    mats.append(qu.specifications['material'])
 
         # Use-case (gaming, coding, music, etc.)
         if qu.use_case:
@@ -655,10 +958,16 @@ class ShopBot:
             # LLM disagrees with NLU/QU — keep NLU/QU
             print(f"[Bot] LLM audio_type={llm_audio!r} IGNORED — NLU/QU has {ents['audio_type']!r}")
 
-        # Count — LLM takes priority
+        # Count — LLM count applied only when genuine (not stray 1 from 'a laptop')
         llm_count = llm.get('count')
-        if llm_count and isinstance(llm_count, int) and llm_count > 0:
+        if llm_count and isinstance(llm_count, int) and llm_count > 1:
             ents['count'] = llm_count
+        elif llm_count == 1:
+            raw_q = ents.get('raw_query') or ''
+            if self._is_single_product_intent(raw_q, ents, {}, llm):
+                ents['count'] = 1
+            else:
+                ents['count'] = None
 
         # Tech specs from LLM
         if not ents.get('tech_specs'):
