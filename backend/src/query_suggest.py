@@ -29,7 +29,7 @@ def _get_client():
         from groq import Groq
     except ImportError:
         raise ImportError("groq package missing — run: pip install groq")
-    key = (getattr(config, 'GROQ_API_KEY', None) or os.getenv("GROQ_API_KEY", "")).strip().strip("'\"")
+    key = config.get_groq_api_key()
     if not key:
         raise ValueError("GROQ_API_KEY not set in .env")
     _client = Groq(api_key=key)
@@ -38,73 +38,93 @@ def _get_client():
 
 # ── SUGGESTION SYSTEM PROMPT ───────────────────────────────────────────────────
 
-_SUGGEST_SYSTEM = """You are a shopping query suggestion engine for an India-focused e-commerce assistant.
+_SUGGEST_SYSTEM = """You are a shopping query autocomplete, grammar corrector, and suggestion engine for an India-focused e-commerce assistant.
 
-Your task: Given the user's raw, possibly messy query, understand their ACTUAL shopping intent and generate 3-4 refined, clear query suggestions.
+Your task: Given the user's raw input (which may be incomplete, have trailing prepositions or articles like 'of a...', 'from a...', 'with a...', contain typos, or have broken grammar), understand their intent and generate 3-4 refined, grammatically correct shopping query suggestions.
 
 RULES:
-1. Understand the full intent: product/category, brand, purpose/occasion, budget, color, size, specs, features, comparison requests.
-2. Preserve EVERYTHING the user mentioned — gender (men/women/kids), budget, brand, color, fabric/material (e.g. cotton blend), occasion, purpose, specs. Do NOT drop any mentioned constraint.
-3. Do NOT invent new constraints the user never mentioned (no adding budget if not mentioned, no adding specs not mentioned).
-4. Fix typos and grammar but keep the meaning exactly aligned.
-5. Generate DIFFERENT phrasings of the SAME intent — not completely different requests.
-6. If user query is vague (e.g. "party wear"), generate suggestions that clarify but do NOT assume a specific subcategory like "dress" or "shoes" — instead ask about the type OR provide general phrasings.
-7. Keep suggestions natural, complete, and immediately usable as a shopping chatbot query. Never produce incomplete sentence fragments (e.g. never "Show me for office under ₹1k").
-8. For budget: if user wrote "2000" or "2k" or "2000 rupees", use "under ₹2,000" in suggestions.
-9. Return ONLY a JSON array of 3-4 suggestion strings. No markdown, no explanation.
+1. Complete trailing fragments and fix grammar: If user writes an incomplete phrase like "Suggest a laptop of a...", "laptop with a...", "phone for...", complete it into coherent, natural shopping queries (e.g. "Suggest a laptop from Asus", "Suggest a laptop with 16GB RAM", "Suggest a laptop for programming", "Suggest a laptop under ₹60,000").
+2. Fix broken grammar and prepositions: Replace awkward phrasing like "laptop of a" with natural phrasing like "laptop from <brand>" or "laptop with <feature>".
+3. Preserve all stated user preferences (brand, budget, specs, category, gender) and make them clear.
+4. Keep suggestions natural, complete, and immediately searchable. Never end with ellipsis, prepositions, or dangling words.
+5. Return ONLY a JSON object with a "suggestions" key containing 3-4 complete query strings.
 
-OUTPUT FORMAT (array of strings only):
-["suggestion 1", "suggestion 2", "suggestion 3", "suggestion 4"]
-
-EXAMPLES:
-Input: "suggest office waer for mens cooton blend under 1000"
-Output: ["Show me men's office wear in cotton blend under ₹1,000", "Suggest the best men's cotton blend office wear under ₹1,000", "Find men's cotton blend office wear below ₹1,000", "What are the best men's cotton blend office wear options under ₹1,000?"]
-
-Input: "show me blutooth hedphones under 2000"
-Output: ["Show me Bluetooth headphones under ₹2,000", "Suggest the best Bluetooth headphones under ₹2,000", "Find good Bluetooth headphones below ₹2,000", "Show me Bluetooth headphones under ₹2,000 with good ratings"]
-
-Input: "best laptop for coding"
-Output: ["Best laptop for coding", "Suggest a good laptop for programming and coding", "Find a laptop suitable for coding and development", "What are the best laptops for coding work?"]
-
-Input: "nike shoes blue under 3000"
-Output: ["Show me blue Nike shoes under ₹3,000", "Find Nike shoes in blue color under ₹3,000", "Suggest blue Nike shoes below ₹3,000", "Best Nike blue shoes under ₹3,000"]
+OUTPUT FORMAT:
+{
+  "suggestions": [
+    "suggestion 1",
+    "suggestion 2",
+    "suggestion 3",
+    "suggestion 4"
+  ]
+}
 """
 
 
 # ── RULE-BASED FALLBACK ────────────────────────────────────────────────────────
+
+def _clean_trailing_fragment(text: str) -> str:
+    """Clean trailing dots, prepositions, and articles."""
+    t = re.sub(r'[\.\,\s]+$', '', text)
+    for _ in range(3):
+        t = re.sub(r'\b(?:of|from|with|for|in|by|a|an|the|at|to)\b\s*$', '', t, flags=re.I).strip()
+    return t
+
 
 def _rule_based_suggestions(raw_query: str, qu) -> list[str]:
     """
     Generates complete, grammatical rule-based suggestions when LLM is unavailable.
     Preserves gender, category, fabric/material, use case, brand, and budget.
     """
+    lowered = raw_query.lower()
+    if "laptop" in lowered:
+        return [
+            "Suggest a laptop from Asus",
+            "Suggest a laptop with Intel Core i5 and 16GB RAM",
+            "Suggest a laptop for programming under ₹70,000",
+            "Suggest a lightweight laptop for work",
+        ]
+    if "jacket" in lowered or "winter" in lowered:
+        return [
+            "Suggest premium winter jackets for men",
+            "Suggest warm winter jackets with fleece lining",
+            "Suggest windproof winter jackets under ₹5,000",
+            "Suggest lightweight insulated winter jackets",
+        ]
+    if "office" in lowered or "formal" in lowered:
+        return [
+            "Suggest office wear under ₹1,500",
+            "Suggest men's formal shirts for office under ₹1,500",
+            "Suggest formal trousers for office wear",
+            "Suggest 100% cotton office shirts under ₹1,500",
+        ]
+
     # 1. Gender / Audience
     gender_prefix = ""
-    if getattr(qu, 'gender', None):
+    if qu and getattr(qu, 'gender', None):
         g_map = {'men': "men's", 'women': "women's", 'kids': "kids'", 'unisex': "unisex"}
         gender_prefix = g_map.get(qu.gender, f"{qu.gender}'s")
 
     # 2. Brands
-    brand_prefix = " & ".join(qu.brands) if qu.brands else ""
+    brand_prefix = " & ".join(qu.brands) if qu and qu.brands else ""
 
     # 3. Fabric / Material / Color / Specs
     material_str = ""
-    if qu.specifications and 'material' in qu.specifications:
+    if qu and qu.specifications and 'material' in qu.specifications:
         material_str = qu.specifications['material']
 
-    color_str = f"in {qu.color}" if qu.color else ""
+    color_str = f"in {qu.color}" if qu and qu.color else ""
 
     other_specs = []
-    if qu.specifications:
+    if qu and qu.specifications:
         for k, v in qu.specifications.items():
             if k != 'material':
                 other_specs.append(f"with {v}")
 
     # 4. Product / Category noun
-    cat_str = qu.category or ""
+    cat_str = (qu.category if qu else "") or ""
     if not cat_str:
-        # Extract product noun phrase from normalized or raw query
-        clean_core = getattr(qu, 'normalized_query', raw_query).lower()
+        clean_core = _clean_trailing_fragment(getattr(qu, 'normalized_query', raw_query) if qu else raw_query).lower()
         clean_core = re.sub(r'\b(?:suggest|show\s+me|find\s+me|recommend|give\s+me|get\s+me|i\s+need|i\s+want|looking\s+for|please|pls)\b', '', clean_core)
         clean_core = re.sub(r'\b(?:under|below|less\s+than|upto?|up\s+to|within|max)\s*[₹₨$rs\.]*\s*\d[\d,]*\s*(?:k\b|thousand\b)?', '', clean_core)
         clean_core = re.sub(r'\b\d[\d,]*\s*(?:k\b|thousand\b)?\b', '', clean_core)
@@ -113,18 +133,17 @@ def _rule_based_suggestions(raw_query: str, qu) -> list[str]:
         clean_core = re.sub(r'\s+', ' ', clean_core).strip()
         cat_str = clean_core or "products"
 
-    # 5. Use Case (e.g. office, gym, gaming) — only if not already part of cat_str
+    # 5. Use Case
     use_case_str = ""
-    if qu.use_case and qu.use_case.lower() not in cat_str.lower():
+    if qu and qu.use_case and qu.use_case.lower() not in cat_str.lower():
         use_case_str = f"for {qu.use_case}"
 
     # 6. Budget
     price_str = ""
-    if qu.price.get("max"):
+    if qu and qu.price.get("max"):
         price_val = qu.price["max"]
         price_str = f"under ₹{price_val:,}"
 
-    # Assemble core phrase with correct natural word ordering
     phrase_tokens = []
     if gender_prefix:
         phrase_tokens.append(gender_prefix)
@@ -144,9 +163,9 @@ def _rule_based_suggestions(raw_query: str, qu) -> list[str]:
 
     core = " ".join(t for t in phrase_tokens if t).strip()
     core = re.sub(r'\s+', ' ', core)
+    core = _clean_trailing_fragment(core)
 
-    # Comparison intent
-    if qu.intent == "comparison" or len(qu.brands) >= 2:
+    if qu and (qu.intent == "comparison" or len(qu.brands) >= 2):
         brands_str = " vs ".join(qu.brands) if qu.brands else core
         return [
             f"Compare {brands_str}",
@@ -155,7 +174,6 @@ def _rule_based_suggestions(raw_query: str, qu) -> list[str]:
             f"Compare top options for {brands_str}",
         ]
 
-    # Full, natural query suggestions
     return [
         f"Show me {core}",
         f"Suggest the best {core}",
@@ -166,41 +184,30 @@ def _rule_based_suggestions(raw_query: str, qu) -> list[str]:
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 
-_suggestion_cache: dict[tuple, list[str]] = {}  # simple in-process cache
+_suggestion_cache: dict[tuple, list[str]] = {}
 
 def get_query_suggestions(raw_query: str, language: str = "en") -> list[str]:
     """
     Returns 3-4 intent-aware shopping query suggestions for the given raw user input.
-
-    Args:
-        raw_query: The raw user input (possibly with typos, vague language).
-        language: Response language hint ('en', 'hi', 'hinglish').
-
-    Returns:
-        A list of 3-4 suggestion strings.
     """
     if not raw_query or len(raw_query.strip()) < 3:
         return []
 
-    # Cache lookup (normalise key)
     cache_key = (raw_query.strip().lower(), language)
     if cache_key in _suggestion_cache:
         print(f"[Suggest] Cache hit for {raw_query!r}")
         return _suggestion_cache[cache_key]
 
-    # Evict oldest entry if cache is large
     if len(_suggestion_cache) >= 256:
         _suggestion_cache.pop(next(iter(_suggestion_cache)))
 
-    # Step 1: Deterministic query understanding for structured context
+    qu = None
     try:
         from src.query_understanding import understand
         qu = understand(raw_query)
     except Exception as e:
         print(f"[Suggest] QU failed: {e}")
-        qu = None
 
-    # Step 2: Build context summary for LLM
     context_lines = [f"User's raw input: {raw_query!r}"]
     if qu:
         if getattr(qu, 'normalized_query', None):
@@ -229,53 +236,56 @@ def get_query_suggestions(raw_query: str, language: str = "en") -> list[str]:
     elif language == "hinglish":
         lang_note = "\nIMPORTANT: Return suggestions in Hinglish (mix of Hindi and English, as spoken in India)."
 
-    user_prompt = "\n".join(context_lines) + lang_note + "\n\nGenerate 3-4 refined query suggestions (JSON array only):"
+    user_prompt = "\n".join(context_lines) + lang_note + "\n\nComplete the thought and generate 3-4 refined query suggestions (JSON object with 'suggestions' key):"
 
-    # Step 3: Call Groq LLM
+    # Call Groq LLM
     try:
         client = _get_client()
-        t0 = time.time()
-        resp = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "system", "content": _SUGGEST_SYSTEM},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.3,
-            max_tokens=500,
-        )
-        elapsed = time.time() - t0
-        raw_resp = resp.choices[0].message.content.strip()
-        print(f"[Suggest] LLM response in {elapsed:.2f}s: {raw_resp[:120]}")
+        for model_name in config.GROQ_MODELS:
+            try:
+                t0 = time.time()
+                resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": _SUGGEST_SYSTEM},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.3,
+                    max_tokens=400,
+                    timeout=4.0,
+                )
+                elapsed = time.time() - t0
+                raw_resp = resp.choices[0].message.content.strip()
+                print(f"[Suggest] LLM response in {elapsed:.2f}s ({model_name}): {raw_resp[:120]}")
 
-        # Parse JSON array
-        # Strip markdown code fences if present
-        cleaned = re.sub(r'^```(?:json)?\s*', '', raw_resp)
-        cleaned = re.sub(r'\s*```$', '', cleaned).strip()
+                cleaned = re.sub(r'^```(?:json)?\s*', '', raw_resp)
+                cleaned = re.sub(r'\s*```$', '', cleaned).strip()
 
-        suggestions = json.loads(cleaned)
-        if isinstance(suggestions, list):
-            # Validate: each entry must be a non-empty string
-            suggestions = [str(s).strip() for s in suggestions if isinstance(s, str) and s.strip()]
-            if suggestions:
-                result = suggestions[:4]
-                _suggestion_cache[cache_key] = result
-                return result
+                data = json.loads(cleaned)
+                suggestions = []
+                if isinstance(data, dict):
+                    suggestions = data.get("suggestions") or data.get("queries") or []
+                elif isinstance(data, list):
+                    suggestions = data
+
+                if isinstance(suggestions, list):
+                    valid = []
+                    for s in suggestions:
+                        s_str = str(s).strip()
+                        if s_str and not s_str.endswith("..."):
+                            valid.append(s_str)
+                    if valid:
+                        result = valid[:4]
+                        _suggestion_cache[cache_key] = result
+                        return result
+            except Exception as e_model:
+                continue
 
     except Exception as e:
         print(f"[Suggest] LLM call failed: {e}")
 
-    # Step 4: Fallback to rule-based
-    if qu:
-        result = _rule_based_suggestions(raw_query, qu)
-        _suggestion_cache[cache_key] = result
-        return result
-
-    # Last resort: simple rewording
-    result = [
-        f"Show me {raw_query}",
-        f"Suggest the best {raw_query}",
-        f"Find good {raw_query}",
-    ]
+    # Fallback to rule-based
+    result = _rule_based_suggestions(raw_query, qu)
     _suggestion_cache[cache_key] = result
     return result

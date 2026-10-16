@@ -23,7 +23,7 @@ def _get_client():
         from groq import Groq
     except ImportError:
         raise ImportError("groq package missing — run: pip install groq")
-    key = (getattr(config, 'GROQ_API_KEY', None) or os.getenv("GROQ_API_KEY", "")).strip().strip("'\"")
+    key = config.get_groq_api_key()
     if not key:
         raise ValueError("GROQ_API_KEY not set in .env")
     _client = Groq(api_key=key)
@@ -86,22 +86,27 @@ INTENT RULES (pick exactly one):
 
 - "multi_item"     → User asks for multiple DIFFERENT product types in one query.
                      Examples: "jeans + t-shirt + sneakers", "phone and earbuds combo"
+                     CRITICAL: A query for ONE product with features (e.g. "Phone with a good camera and long battery life")
+                     is NEVER multi_item! It is "product_search" or "recommendation" for a single product.
                      search_required: true
 
 SEARCH_REQUIRED RULES:
 Set search_required = false when:
-  - intent is "information"
-  - intent is "comparison" AND no price constraint AND no explicit buy/find/show/products signal
+  - intent is "information" (e.g. concept questions, material science, "Tell me about [material] used for [part]... properties, benefits, tradeoffs")
+  - intent is "comparison" AND conceptual/general AND no specific "best products" or price asked (e.g. "Nike or Adidas for running?")
   - user says "just explain", "just tell me", "just compare", "only explain", "don't recommend"
 Set search_required = true when:
   - intent is "recommendation" or "product_search" or "multi_item"
+  - user asks for "best" products or top models, even without a price (e.g. "What are the best Dell and HP gaming laptops?", "What are the best running shoes?") -> search_required: true!
   - intent is "comparison" AND a price constraint is present (under ₹X, below ₹X, etc.)
   - user explicitly requests products/prices/listings
 
 CRITICAL DISTINCTION:
   "Nike or Adidas for running?"  → comparison, search_required: false
+  "What are the best Dell and HP gaming laptops?" → comparison, search_required: true (user asked for top laptop recommendations from both brands)
   "Compare Nike and Adidas shoes under ₹5000" → comparison, search_required: true
   "Which earbuds are best?" → recommendation, search_required: true
+  "Tell me about Copper / Brass used for the Rivets... properties, benefits, tradeoffs" → information, search_required: false (material science question, NO product cards)
   "What is ANC?" → information, search_required: false
 
 AUDIO TYPE RULE — CRITICAL:
@@ -125,15 +130,41 @@ COUNT RULES:
   - No number mentioned → null  (system will default to 6)
 - count must be an integer or null. Never a string.
 
-FEATURE EXTRACTION RULES:
-- processor: Extract exactly — "i7", "i5", "Ryzen 5", "Snapdragon 8 Gen 3", etc.
-- ram: Extract with unit — "16GB RAM", "8GB RAM"
-- storage: Extract with unit — "512GB SSD", "1TB SSD"
-- camera: Extract MP or type — "108MP", "50MP", "triple camera"
-- battery: Extract mAh — "5000mAh"
+FEATURE EXTRACTION RULES — STRICT:
+- processor: Extract EXACTLY as stated — "i7", "i5", "i3", "Ryzen 5", "Snapdragon 8 Gen 3".
+  NEVER omit processor if user states one. "i5 laptop" → processor: "i5".
+- ram: Extract with unit — "16GB", "8GB". NEVER omit if stated. "16GB RAM" → ram: "16GB".
+- storage: Extract with unit — "512GB", "128GB", "1TB". "128GB storage" → storage: "128GB".
+  128GB and 256GB are realistic phone storage. 512GB is realistic laptop storage.
+- camera: Extract MP or type — "108MP", "50MP", "triple camera".
+- battery: Extract mAh EXACTLY — "10000mAh", "5000mAh". A 10,000mAh battery is a power bank / tablet.
+  For phones typical is 4000-6000mAh. Extract whatever user says, do not change it.
 - style (fashion): "printed", "solid", "casual", "formal", "slim fit", "oversized", etc.
-- fabric: "cotton", "denim", "linen", "polyester", "silk", etc.
-- fit: "slim", "regular", "loose", "skinny", "relaxed"
+- fabric: Extract EXACTLY — "cotton", "denim", "linen", "polyester", "silk", "leather".
+  CRITICAL: "cotton t-shirt" → fabric: "cotton". "denim jacket" → fabric: "denim".
+  "leather shoes" → fabric: "leather". NEVER ignore material/fabric if user mentions it.
+- fit: "slim", "regular", "loose", "skinny", "relaxed".
+
+BUDGET REALISM RULES:
+- NEVER substitute a completely different product just because the exact product is too expensive.
+  Example: User asks for laptop under ₹5000 → respond that laptops don't exist that cheaply,
+  NOT by showing phone cases or accessories.
+- Realistic Indian price floors:
+  Laptop: ₹18,000 minimum. Under ₹15,000 = unrealistic for laptop.
+  Phone: ₹4,000 minimum. Under ₹2,000 = unrealistic for smartphone.
+  Earbuds (TWS): ₹499 minimum. Under ₹300 = unrealistic.
+  T-shirt: ₹199 minimum.
+  Shoes: ₹399 minimum.
+- When budget is unrealistic: set search_queries to search for the cheapest valid option
+  (e.g., "cheapest laptop India" instead of "laptop under ₹5000").
+
+MATERIAL / SPEC INTEGRITY RULES:
+- If user asks for "cotton t-shirt" — search_queries MUST include "cotton" in every query.
+- If user asks for "denim jacket" — search_queries MUST include "denim" or "denim jacket".
+- If user asks for "leather shoes" — search_queries MUST include "leather shoes".
+- If user asks for i5 laptop — search_queries MUST include "i5" or "Intel Core i5".
+- If user asks for 16GB RAM — search_queries MUST include "16GB" or "16GB RAM".
+- NEVER drop explicitly stated specs from search queries.
 
 VAGUE QUERY EXPANSIONS:
 Convert vague terms to concrete search strings:
@@ -146,24 +177,26 @@ Convert vague terms to concrete search strings:
 - "lightweight" → ["lightweight", "thin", "ultrabook", "portable"]
 
 SEARCH QUERY RULES:
-- Build 1-3 ready-to-use Google Shopping search strings for India
-- Include relevant features, price constraints, brand, and "India"
-- For audio: ALWAYS use the EXACT audio_type word in every search query
+- Build 1-3 ready-to-use Google Shopping search strings for India.
+- Include ALL relevant features, price constraints, brand, and "India" in every query.
+- PRESERVE all user-specified specs in queries — processor, RAM, storage, material, battery.
+- For audio: ALWAYS use the EXACT audio_type word in every search query.
   ✓ "boAt earbuds under 2000 India" (if audio_type=earbuds)
   ✗ "boAt audio under 2000 India"   (wrong — too generic)
-- For comparison: one query per brand
-- Include tech specs in query when mentioned: "HP laptop Intel i7 16GB RAM India"
-- Include style in fashion queries: "men printed cotton t-shirt under 500 India"
+- For comparison: one query per brand.
+- Include tech specs in query when mentioned: "HP laptop Intel i5 16GB RAM 512GB SSD India"
+- Include material in fashion queries: "men cotton printed t-shirt under 500 India"
 - search_queries may be empty list when search_required is false.
+- For variety: use slightly different phrasing across queries (e.g., brand first vs specs first).
 
 CRITICAL RULES:
-- "compare X vs Y" or "X vs Y" → ALWAYS comparison
-- "X or Y for running?" → comparison, search_required: false (no buy signal, no price)
-- "is X better than Y" / "which is better X or Y" → comparison or information
-- "difference between brand A and brand B" → comparison
-- "difference between X and Y" with NO brand names → information
-- earbuds and earphones and headphones are completely different — NEVER mix them
-- If count is 1 and intent is recommendation → single best item only
+- "compare X vs Y" or "X vs Y" → ALWAYS comparison.
+- "X or Y for running?" → comparison, search_required: false (no buy signal, no price).
+- "is X better than Y" / "which is better X or Y" → comparison or information.
+- "difference between brand A and brand B" → comparison.
+- "difference between X and Y" with NO brand names → information.
+- earbuds and earphones and headphones are completely different — NEVER mix them.
+- If count is 1 and intent is recommendation → single best item only.
 - explanation: REQUIRED for information (2-4 sentences, plain prose, no markdown).
   REQUIRED for comparison when search_required=false — write a STRUCTURED comparison:
     Line 1: Brief intro (1 sentence).
@@ -174,6 +207,8 @@ CRITICAL RULES:
   Use plain text, no markdown bullets. Separate sections with a blank line.
   Empty string ONLY for pure shopping queries (recommendation/product_search).
 - items: For comparison list ALL brand/product names. For multi_item list product types. Else empty list.
+- NEVER replace the requested product type with an unrelated product because budget is low.
+  Instead, find the cheapest valid product or explain the budget is unrealistic.
 """
 
 
@@ -201,18 +236,34 @@ def llm_reason(query: str, language: str = 'en') -> dict:
             effective_system = f"{_SYSTEM}\n\n{lang_prompt}"
 
             client = _get_client()
-            resp = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=[
-                    {"role": "system", "content": effective_system},
-                    {"role": "user",   "content": query.strip()},
-                ],
-                temperature=0.1,
-                max_tokens=600,
-                timeout=timeout_secs,
-            )
-            raw = resp.choices[0].message.content.strip()
+            import random as _random
+            # Vary temperature dynamically for repeated queries to get diverse, fresh responses like ChatGPT
+            temp = 0.65 + (_random.random() * 0.2)
+            raw = ""
+            for model_candidate in config.GROQ_MODELS:
+                try:
+                    resp = client.chat.completions.create(
+                        model=model_candidate,
+                        messages=[
+                            {"role": "system", "content": effective_system},
+                            {"role": "user",   "content": query.strip()},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=temp,
+                        max_tokens=2048,
+                        timeout=timeout_secs,
+                    )
+                    content = (resp.choices[0].message.content or "").strip()
+                    if content:
+                        raw = content
+                        break
+                except Exception as ex_m:
+                    print(f"[LLM] Model {model_candidate} call failed: {ex_m}")
+                    continue
+
             raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.DOTALL).strip()
+            if not raw:
+                return None
 
             data = json.loads(raw, strict=False)
 

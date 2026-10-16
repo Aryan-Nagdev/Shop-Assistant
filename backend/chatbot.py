@@ -10,7 +10,7 @@ v5 — Intent Detection + Search Routing:
   7. Priority: explicit no-search signals > deterministic QU > LLM > NLU
   8. All Phase 1/2/3 functionality preserved
 """
-import sys, os, re
+import sys, os, re, random
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.nlu_engine import analyse, KNOWN_BRANDS
@@ -142,23 +142,27 @@ class ShopBot:
         if llm is None:
             qu_ready = (
                 not qu.needs_clarification
-                and qu.intent in ('recommendation', 'product_search')
-                and qu.search_required
-                and (qu.category or qu.audio_type)
+                and qu.intent in ('recommendation', 'product_search', 'comparison', 'information')
+                and (
+                    qu.category 
+                    or qu.audio_type 
+                    or (qu.intent == 'comparison' and len(qu.brands or []) >= 2)
+                    or (qu.intent == 'information' and not qu.search_required)
+                )
             )
             if qu_ready:
-                print("[Bot] Skipping LLM reason — query already understood by QU.")
+                print(f"[Bot] Skipping LLM reason — query intent '{qu.intent}' already understood by QU.")
                 llm = {
                     'intent': qu.intent,
                     'canonical_intent': qu.intent,
-                    'search_required': True,
+                    'search_required': qu.search_required if qu.intent != 'comparison' else True,
                     'explanation': '',
-                    'items': [],
+                    'items': qu.brands or [],
                     'count': None,
                     'features': {},
                     'vague_expansions': [],
                     'search_queries': [],
-                    'confidence': 0.9,
+                    'confidence': 0.92,
                 }
             else:
                 llm = llm_reason(effective_q, language=effective_lang)
@@ -231,7 +235,7 @@ class ShopBot:
                     prods    = fetch_one(queries[0]['query'] if queries else search_query_seed, ents, top_n=3)
                     products = prods[:1]
                     intent   = 'single_best'
-                elif nlu_intent_raw == 'multi_item':
+                elif intent == 'multi_item' and nlu_intent_raw == 'multi_item':
                     brands_data = {}
                     for q_info in queries:
                         item_ents = dict(ents)
@@ -243,7 +247,7 @@ class ShopBot:
                     intent = 'multi_item'
                 else:
                     target_count = ents.get('count')
-                    if not target_count or not isinstance(target_count, int) or target_count <= 1:
+                    if not target_count or not isinstance(target_count, int) or target_count <= 0:
                         target_count = DEFAULT_COUNT
                     if queries:
                         products = fetch_one(queries[0]['query'], ents, top_n=target_count)
@@ -251,8 +255,11 @@ class ShopBot:
                         products = fetch_one(search_query_seed, ents, top_n=target_count)
 
             else:
+                target_count = ents.get('count')
+                if not target_count or not isinstance(target_count, int) or target_count <= 0:
+                    target_count = DEFAULT_COUNT
                 q_str = queries[0]['query'] if queries else search_query_seed
-                products = fetch_one(q_str, ents, top_n=DEFAULT_COUNT)
+                products = fetch_one(q_str, ents, top_n=target_count)
 
             # ── STEP 4: Build response ─────────────────────────────────────────
             text, cards = build_response(
@@ -578,6 +585,15 @@ class ShopBot:
         # QU returns None when ambiguous — only trust it when it has a clear signal.
         if qu_intent is not None and qu_search is not None:
             if qu_intent == 'information':
+                # Guard: If query is actually asking for recommendations ("What are the best..."), it is NOT information
+                if re.search(r'\b(?:what\s+(?:is|are)\s+(?:the\s+)?(?:best|top|recommended|good)|which\s+(?:is|are)\s+(?:the\s+)?(?:best|top))\b', user_msg, re.I):
+                    brands = ents.get('brands', [])
+                    if len(brands) >= 2:
+                        print(f"[Bot] Overriding information -> comparison for best across {brands} (search_required=True)")
+                        return 'comparison', True
+                    print(f"[Bot] Overriding information -> recommendation for best product query (search_required=True)")
+                    return 'recommendation', True
+
                 print(f"[Bot] QU says information → no search.")
                 return 'information', False
 
@@ -634,34 +650,63 @@ class ShopBot:
         Comparison → structured format (Option A / Option B / use case / verdict).
         Information → concise expert explanation.
         """
+        is_material_question = bool(re.search(
+            r'\b(?:material|copper|brass|rivet|rivets|fabric|cotton|denim|leather|polyester|wool|nylon|linen|silk|'
+            r'properties|benefits|tradeoffs?|durability|corrosion|hardware|zipper|stitching|build|finish)\b',
+            query, re.I
+        ))
+
         # LLM already provided an explanation via llm_reason — prefer it
+        nudge_comparison = [
+            "\n\n↪ *Want me to search for actual products with live ₹ prices? Just ask!*",
+            "\n\n💡 *Curious about real deals? Let me know and I'll pull up live prices and top-rated models!*",
+            "\n\n🔍 *Want to compare actual available products and latest discounts? Just say the word!*",
+            "\n\n🛍️ *Ready to see specific models and live pricing in India? Ask anytime!*",
+        ]
+        nudge_info = [
+            "\n\n↪ *Want me to find or compare actual products? Just ask!*",
+            "\n\n💡 *Looking for concrete recommendations or live pricing? I'm ready to find them!*",
+            "\n\n🔍 *If you'd like to check out actual models under a specific budget, let me know!*",
+            "\n\n🛍️ *Feel free to ask for top-rated options or live deals anytime!*",
+        ]
+
         if explanation and len(explanation) > 60:
-            nudge = (
-                "\n\n↪ *Want me to search for actual products with live ₹ prices? Just ask!*"
-                if intent == 'comparison'
-                else "\n\n↪ *Want me to find or compare actual products? Just ask!*"
-            )
+            if is_material_question:
+                return explanation
+            nudge = random.choice(nudge_comparison) if intent == 'comparison' else random.choice(nudge_info)
             return explanation + nudge
 
         # Explanation was missing or too short — generate via inline Groq call
         try:
             import os
             from groq import Groq
-            key = os.getenv("GROQ_API_KEY", "").strip().strip("'\"")
+            key = config.get_groq_api_key()
             if not key:
                 raise ValueError("No API key")
 
             client = Groq(api_key=key)
 
             if intent == 'information':
-                system_prompt = (
-                    "You are a helpful India e-commerce and technology expert assistant.\n"
-                    "Answer the user's question clearly and concisely in 2-4 sentences.\n"
-                    "Be direct and accurate. Use plain prose. No markdown. "
-                    "Do NOT recommend or mention specific products unless asked."
-                )
+                if is_material_question:
+                    system_prompt = (
+                        "You are an expert materials scientist and apparel/hardware engineer.\n"
+                        "The user is asking about materials and components used in products.\n"
+                        "Provide a thorough, fresh, direct, and well-structured explanation covering:\n"
+                        "1. Key mechanical and chemical properties (e.g., tensile strength, ductility, corrosion resistance, patina).\n"
+                        "2. Benefits and advantages of using this material in this product application.\n"
+                        "3. Tradeoffs, limitations, or potential drawbacks (e.g., weight, cost, maintenance/oxidation).\n"
+                        "Write naturally like modern AI. Do NOT recommend or sell products."
+                    )
+                    max_tok = 600
+                else:
+                    system_prompt = (
+                        "You are a helpful India e-commerce and technology expert assistant.\n"
+                        "Answer the user's question clearly, naturally, and concisely in 2-4 sentences.\n"
+                        "Provide engaging, fresh conversational phrasing like ChatGPT. Be direct and accurate. "
+                        "Do NOT recommend or mention specific products unless asked."
+                    )
+                    max_tok = 350
                 user_content = query
-                max_tok = 300
 
             else:  # comparison
                 brands = ents.get('brands', [])
@@ -669,7 +714,7 @@ class ShopBot:
 
                 system_prompt = (
                     "You are a knowledgeable India e-commerce shopping expert.\n"
-                    "The user wants to compare options. Give a structured, helpful comparison.\n\n"
+                    "The user wants to compare options. Give a fresh, engaging, structured comparison like modern conversational AI.\n\n"
                     "FORMAT (use plain text, NO markdown, NO bullet points, NO asterisks):\n"
                     "Paragraph 1: One-sentence intro about both options.\n"
                     "Paragraph 2: [First option] — describe 2-3 key strengths or characteristics "
@@ -691,21 +736,42 @@ class ShopBot:
 
             messages = [{"role": "system", "content": system_prompt}] + history_msgs + [{"role": "user", "content": user_content}]
 
-            resp = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=messages,
-                temperature=0.3,
-                max_tokens=max_tok,
-                timeout=8.0,
-            )
-            ans = resp.choices[0].message.content.strip()
-            ans = re.sub(r'\*\*(.*?)\*\*', r'\1', ans).replace('**', '')
-            nudge = (
-                "\n\n↪ Want me to search for actual products with live ₹ prices? Just ask!"
-                if intent == 'comparison'
-                else "\n\n↪ Want me to find or compare actual products? Just ask!"
-            )
-            return ans + nudge
+            # Dynamic temperature for fresh, varied answers every turn
+            dyn_temp = round(random.uniform(0.70, 0.85), 2)
+            ans = ""
+            for model_cand in config.GROQ_MODELS:
+                try:
+                    resp = client.chat.completions.create(
+                        model=model_cand,
+                        messages=messages,
+                        temperature=dyn_temp,
+                        max_tokens=max_tok,
+                        timeout=8.0,
+                    )
+                    content = (resp.choices[0].message.content or "").strip()
+                    if content:
+                        ans = content
+                        break
+                except Exception as ex_m:
+                    print(f"[Bot] Model {model_cand} in _generate_text_answer failed: {ex_m}")
+                    continue
+
+            if ans:
+                ans = re.sub(r'\*\*(.*?)\*\*', r'\1', ans).replace('**', '')
+                if is_material_question:
+                    return ans
+                nudge = random.choice([
+                    "\n\n↪ Want me to search for actual products with live ₹ prices? Just ask!",
+                    "\n\n💡 Curious about real deals? Let me know and I'll pull up live prices and top-rated models!",
+                    "\n\n🔍 Want to compare actual available products and latest discounts? Just say the word!",
+                    "\n\n🛍️ Ready to see specific models and live pricing in India? Ask anytime!",
+                ]) if intent == 'comparison' else random.choice([
+                    "\n\n↪ Want me to find or compare actual products? Just ask!",
+                    "\n\n💡 Looking for concrete recommendations or live pricing? I'm ready to find them!",
+                    "\n\n🔍 If you'd like to check out actual models under a specific budget, let me know!",
+                    "\n\n🛍️ Feel free to ask for top-rated options or live deals anytime!",
+                ])
+                return ans + nudge
 
         except Exception as e:
             print(f"[Bot] _generate_text_answer fallback LLM failed: {e}")
@@ -718,6 +784,17 @@ class ShopBot:
                 "\"Compare [Brand A] vs [Brand B] under ₹X\""
             )
         q_low = query.lower()
+        if 'copper' in q_low or 'brass' in q_low or 'rivet' in q_low:
+            return (
+                "Copper and brass rivets are classic, durable hardware choices widely used in heavy-duty apparel, workwear, and cargo trousers to reinforce high-stress stress points (such as pocket corners and seam junctions).\n\n"
+                "Key Properties & Benefits:\n"
+                "- Exceptional Corrosion Resistance: Both copper and brass are non-ferrous and naturally immune to rusting from perspiration or repeated laundry cycles.\n"
+                "- High Ductility & Strength: They can be securely peened and cold-formed without fracturing, providing permanent reinforcement that prevents heavy fabric seams from splitting.\n"
+                "- Timeless Aesthetic: Over time, both metals develop a rich, vintage oxidation patina without deteriorating structurally.\n\n"
+                "Tradeoffs & Drawbacks:\n"
+                "- Weight & Cost: Copper and brass are denser and more expensive than stamped steel or zinc alloys.\n"
+                "- Verdigris Oxidation: In hot, humid conditions, exposure to harsh alkaline detergents or moisture can create greenish surface patina if not thoroughly dried."
+            )
         if 'abs' in q_low or 'plastic' in q_low or 'aluminum' in q_low or 'blazer' in q_low:
             return (
                 "ABS plastic (Acrylonitrile Butadiene Styrene) is a rigid, impact-resistant thermoplastic polymer known for durability, lightness, and scratch resistance. "
@@ -760,11 +837,10 @@ class ShopBot:
             if candidate not in brands:
                 brands.append(candidate)
 
-        # Source 3: substring scan of raw query (catches brands NLU missed due to typos)
+        # Source 3: regex scan of raw query (catches brands with word boundaries to avoid substring false positives)
         q_lower = query.lower()
         for b_lower, b_display in KNOWN_BRANDS.items():
-            # Use substring match (not word-boundary) to handle typo adjacency
-            if b_lower in q_lower and b_display not in brands:
+            if len(b_lower) >= 2 and re.search(r'\b' + re.escape(b_lower) + r'\b', q_lower) and b_display not in brands:
                 brands.append(b_display)
 
         # Deduplicate while preserving order, limit to first 4
@@ -786,7 +862,8 @@ class ShopBot:
         for b in brands:
             product_type = re.sub(r'\b' + re.escape(b.lower()) + r'\b', '', product_type)
         product_type = re.sub(
-            r'\b(?:vs\.?|versus|compare|comparison|difference\s+between|'
+            r'\b(?:what\s+(?:is|are)|which\s+(?:is|are)|the|best|top|suggest|recommend|'
+            r'vs\.?|versus|compare|comparison|difference\s+between|'
             r'just|only|which\s+is\s+better|better\s+than|between|and|or|'
             r'tell|me|show|find)\b',
             '', product_type, flags=re.I)
@@ -934,6 +1011,11 @@ class ShopBot:
             if qu.use_case == 'gaming':
                 ents['gaming'] = True
 
+        # Count — QU is authoritative if set
+        if getattr(qu, 'count', None):
+            ents['count'] = qu.count
+            print(f"[Bot] QU count={qu.count!r} applied to ents")
+
         # Attach full QU and requirements for downstream strict validation
         ents['qu'] = qu
         ents['hard_requirements'] = qu.hard_requirements
@@ -969,12 +1051,37 @@ class ShopBot:
             else:
                 ents['count'] = None
 
-        # Tech specs from LLM
+        # Tech specs from LLM — fill missing slots AND propagate to hard_requirements
         if not ents.get('tech_specs'):
             ents['tech_specs'] = {}
-        for spec in ('processor', 'ram', 'storage', 'display', 'camera', 'battery'):
-            if features.get(spec) and not ents['tech_specs'].get(spec):
-                ents['tech_specs'][spec] = features[spec]
+        hard_reqs = list(ents.get('hard_requirements') or [])
+        existing_hard_keys = {h.split(':')[0].strip().lower() for h in hard_reqs}
+
+        # LLM field name → internal spec key mapping
+        _LLM_SPEC_MAP = {
+            'processor': 'cpu',
+            'ram':       'ram',
+            'storage':   'storage',
+            'display':   'display',
+            'camera':    'camera',
+            'battery':   'battery',
+        }
+        for llm_field, internal_key in _LLM_SPEC_MAP.items():
+            llm_val = features.get(llm_field)
+            if not llm_val:
+                continue
+            # Fill missing tech_spec slot (NLU/QU have higher priority)
+            if not ents['tech_specs'].get(internal_key):
+                ents['tech_specs'][internal_key] = llm_val
+                print(f"[Bot] LLM spec {internal_key}={llm_val!r} applied to tech_specs")
+            # Promote to hard_requirements so the validator enforces the constraint
+            if internal_key not in existing_hard_keys:
+                req_label = f"{internal_key}: {llm_val}"
+                hard_reqs.append(req_label)
+                existing_hard_keys.add(internal_key)
+                print(f"[Bot] LLM spec promoted to hard_requirement: {req_label!r}")
+
+        ents['hard_requirements'] = hard_reqs
 
         # Fashion style / fit
         for key in ('style', 'fit'):
@@ -982,10 +1089,17 @@ class ShopBot:
             if val and val not in ents.get('fashion_styles', []):
                 ents.setdefault('fashion_styles', []).append(val)
 
-        # Material / fabric
-        val = features.get('fabric')
-        if val and val not in ents.get('materials', []):
-            ents.setdefault('materials', []).append(val)
+        # Material / fabric — add to materials list AND tech_specs for search query building
+        fabric_val = features.get('fabric')
+        if fabric_val:
+            mats = ents.setdefault('materials', [])
+            if fabric_val not in mats:
+                mats.append(fabric_val)
+                print(f"[Bot] LLM fabric={fabric_val!r} added to materials")
+            # Also store in tech_specs so search queries include the material
+            if not ents['tech_specs'].get('material'):
+                ents['tech_specs']['material'] = fabric_val
+                print(f"[Bot] LLM fabric={fabric_val!r} stored in tech_specs['material']")
 
         # Vague expansions
         vague_expansions = llm.get('vague_expansions') or []

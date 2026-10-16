@@ -138,6 +138,26 @@ _FALLBACK_REGISTRY: dict[str, list[dict]] = {
         {"part": "Zipper",          "material": "Nylon / Invisible Zipper",         "icon": "🔗", "confidence": "high",   "description": "Invisible zipper is concealed within the seam for clean aesthetics"},
         {"part": "Embellishments",  "material": "Sequins / Beads (Plastic/Glass)",  "icon": "✨", "confidence": "medium", "description": "Decorative elements stitched or glued onto fabric"},
     ],
+    "jacket": [
+        {"part": "Outer Shell",     "material": "100% Polyester / Nylon Ripstop",    "icon": "🧥", "confidence": "high",   "description": "Windproof and water-resistant synthetic shell fabric"},
+        {"part": "Insulation",       "material": "Polyfill Fiber / Fleece Lining",    "icon": "❄️", "confidence": "high",   "description": "Thermal batting or fleece traps warm air for cold-weather insulation"},
+        {"part": "Inner Lining",     "material": "Polyester Taffeta / Satin",         "icon": "🧵", "confidence": "high",   "description": "Smooth fabric lining reduces friction and glides over inner clothing"},
+        {"part": "Zipper & Hardware","material": "YKK Metal / Molded Resin Teeth",    "icon": "🔗", "confidence": "high",   "description": "Heavy-duty closure hardware designed to withstand winter wear and strain"},
+        {"part": "Cuffs & Hem",      "material": "Ribbed Knit Elastane / Elastic",   "icon": "🔘", "confidence": "medium", "description": "Elasticated ribbing seals out wind and draft at wrists and waist"},
+    ],
+    "office wear": [
+        {"part": "Main Fabric",     "material": "100% Cotton / Cotton-Polyester Blend", "icon": "👔", "confidence": "high", "description": "Breathable formal shirting fabric with crisp finish and wrinkle resistance"},
+        {"part": "Buttons",         "material": "Polyester Resin / Mother of Pearl",   "icon": "⚪", "confidence": "high", "description": "Durable resin buttons for formal shirt/trouser fastening"},
+        {"part": "Interlining",     "material": "Fusible Cotton Interlining",          "icon": "🔧", "confidence": "high", "description": "Gives structure and sharpness to formal shirt collar and cuffs"},
+        {"part": "Seams & Stitches","material": "High-Tensile Polyester Thread",       "icon": "🧵", "confidence": "high", "description": "Reinforced stitching maintains seam integrity over frequent washes"},
+    ],
+    "trouser": [
+        {"part": "Main Fabric",     "material": "100% Cotton / Cotton Twill / Chino",  "icon": "👖", "confidence": "high", "description": "Durable twill weave offering comfort, breathability, and structure"},
+        {"part": "Rivets & Fasteners","material": "Copper / Brass / Zinc Alloy",       "icon": "🔩", "confidence": "high", "description": "Metal rivets reinforce pocket stress points; metal shank or button waistband"},
+        {"part": "Zipper Fly",      "material": "Brass / Metal Teeth (YKK)",           "icon": "🔗", "confidence": "high", "description": "Sturdy metal zipper designed for daily pants closure"},
+        {"part": "Pocket Lining",   "material": "Cotton Sheeting / Poplin",            "icon": "🔲", "confidence": "high", "description": "Lightweight cotton lining for interior pocket bags"},
+        {"part": "Waistband",       "material": "Interlined Cotton Twill",             "icon": "🧵", "confidence": "high", "description": "Fusible interlining inside waistband prevents stretching"},
+    ],
 
     # ── Kitchen / Appliances ───────────────────────────────────────────────────
     "pressure cooker": [
@@ -225,6 +245,18 @@ _CATEGORY_ALIASES: dict[str, str] = {
     "handbag": "bag",
     "laptop bag": "backpack",
     "school bag": "backpack",
+    "winter jacket": "jacket",
+    "winter wear": "jacket",
+    "coat": "jacket",
+    "blazer": "office wear",
+    "formal wear": "office wear",
+    "work wear": "office wear",
+    "office shirt": "shirt",
+    "formal shirt": "shirt",
+    "pants": "trouser",
+    "trousers": "trouser",
+    "chinos": "trouser",
+    "cargo pant": "trouser",
 }
 
 
@@ -265,9 +297,17 @@ def _infer_category_from_title(title: str) -> str | None:
         return "speaker"
     if any(w in t for w in ["shoes", "sneakers", "running", "footwear", "boot", "slipper"]):
         return "shoes"
-    if any(w in t for w in ["t-shirt", "tshirt", "shirt", "polo", "tee"]):
+    if any(w in t for w in ["jacket", "coat", "blazer", "windcheater", "windbreaker", "winter wear", "sweater", "hoodie"]):
+        return "jacket"
+    if any(w in t for w in ["t-shirt", "tshirt", "polo", "tee"]):
         return "t-shirt"
-    if any(w in t for w in ["jeans", "denim", "trouser", "pants"]):
+    if any(w in t for w in ["office wear", "formal wear", "work wear"]):
+        return "office wear"
+    if any(w in t for w in ["shirt", "formal shirt", "cotton shirt"]):
+        return "shirt"
+    if any(w in t for w in ["trouser", "pants", "chinos", "cargos"]):
+        return "trouser"
+    if any(w in t for w in ["jeans", "denim"]):
         return "jeans"
     if any(w in t for w in ["dress", "kurti", "salwar", "saree", "kurta"]):
         return "dress"
@@ -320,7 +360,8 @@ def _call_llm(title: str, brand: str | None, category: str | None) -> list[dict]
     try:
         import os
         from groq import Groq
-        key = os.getenv("GROQ_API_KEY", "").strip().strip("'\"")
+        import config
+        key = config.get_groq_api_key()
         if not key:
             return None
 
@@ -328,40 +369,48 @@ def _call_llm(title: str, brand: str | None, category: str | None) -> list[dict]
         prompt = (
             f"Product: {title}\n"
             f"Brand: {brand or 'Unknown'}\n"
-            f"Category: {category or 'Consumer Electronics'}\n\n"
+            f"Category: {category or 'General'}\n\n"
             "Identify the key components and exact materials used in this product."
         )
 
-        resp = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "system", "content": _LLM_SYSTEM},
-                {"role": "user",   "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=500,
-            timeout=4.0,
-        )
-        raw = resp.choices[0].message.content.strip()
-        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.DOTALL).strip()
+        for model_name in config.GROQ_MODELS:
+            try:
+                resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": _LLM_SYSTEM},
+                        {"role": "user",   "content": prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                    max_tokens=600,
+                    timeout=5.0,
+                )
+                raw = resp.choices[0].message.content.strip()
+                raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.DOTALL).strip()
 
-        data = json.loads(raw, strict=False)
-        materials = data.get("materials") if isinstance(data, dict) else data
-        if not isinstance(materials, list) or len(materials) == 0:
-            return None
+                data = json.loads(raw, strict=False)
+                materials = data.get("materials") if isinstance(data, dict) else data
+                if not isinstance(materials, list) or len(materials) == 0:
+                    continue
 
-        # Validate each entry has required keys
-        valid = []
-        for m in materials:
-            if isinstance(m, dict) and m.get("part") and m.get("material"):
-                valid.append({
-                    "part":        str(m.get("part", "")).strip(),
-                    "material":    str(m.get("material", "")).strip(),
-                    "icon":        str(m.get("icon", "🔧")).strip() or "🔧",
-                    "confidence":  m.get("confidence", "medium") if m.get("confidence") in ("high","medium","low") else "medium",
-                    "description": str(m.get("description", "")).strip(),
-                })
-        return valid if valid else None
+                # Validate each entry has required keys
+                valid = []
+                for m in materials:
+                    if isinstance(m, dict) and m.get("part") and m.get("material"):
+                        valid.append({
+                            "part":        str(m.get("part", "")).strip(),
+                            "material":    str(m.get("material", "")).strip(),
+                            "icon":        str(m.get("icon", "🔧")).strip() or "🔧",
+                            "confidence":  m.get("confidence", "medium") if m.get("confidence") in ("high","medium","low") else "medium",
+                            "description": str(m.get("description", "")).strip(),
+                        })
+                if valid:
+                    return valid
+            except Exception as e_mod:
+                continue
+
+        return None
 
     except Exception as e:
         print(f"[MaterialAnalyzer] LLM call failed: {e}")
@@ -417,6 +466,23 @@ def get_materials(
             _CACHE[cache_key] = fallback
         return fallback
 
+    # Check if title or category suggests apparel/fashion
+    is_apparel = any(w in title.lower() for w in [
+        "jacket", "coat", "shirt", "pant", "trouser", "jean", "denim", "suit", "blazer",
+        "cotton", "polyester", "wool", "fleece", "t-shirt", "tee", "hoodie", "sweater",
+        "dress", "kurta", "kurti", "wear", "fabric", "cloth", "chinos"
+    ]) or (resolved_cat in ["jacket", "shirt", "trouser", "jeans", "t-shirt", "dress", "office wear", "apparel"])
+
+    if is_apparel:
+        generic_apparel = [
+            {"part": "Main Fabric", "material": "100% Cotton / Polyester Blend", "icon": "🧵", "confidence": "high", "description": "Durable, breathable textile blend for everyday wear"},
+            {"part": "Buttons / Zipper", "material": "Resin / Metal Alloy", "icon": "🔘", "confidence": "high", "description": "Sturdy fastening components designed for longevity"},
+            {"part": "Stitching", "material": "Reinforced Polyester Thread", "icon": "🪡", "confidence": "medium", "description": "High-tensile seam stitching to prevent tearing"},
+        ]
+        if use_cache:
+            _CACHE[cache_key] = generic_apparel
+        return generic_apparel
+
     # 3. Generic consumer product fallback
     generic = [
         {"part": "Main Body",       "material": "ABS Plastic / Aluminum",   "icon": "🏗️", "confidence": "low", "description": "Common construction materials for consumer electronics"},
@@ -424,6 +490,8 @@ def get_materials(
         {"part": "Connectors",      "material": "Gold-Plated Copper",        "icon": "🔌", "confidence": "medium", "description": "Gold plating prevents oxidation for reliable electrical contacts"},
     ]
     print(f"[MaterialAnalyzer] Using generic fallback for: {title[:40]!r}")
+    if use_cache:
+        _CACHE[cache_key] = generic
     return generic
 
 

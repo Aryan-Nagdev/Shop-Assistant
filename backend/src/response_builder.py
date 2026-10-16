@@ -8,24 +8,27 @@ Fixes:
   4. _pairing_response    — handles empty product list gracefully
   5. All responses        — consistent ₹ formatting and tips
 """
-import re, sys, os, json
+import re, sys, os, json, random
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from src.product_deduplicator import deduplicate_products
 
 # ── LLM insight generator (reuses Groq client from llm_reason) ────────────────
 def _llm_insight(prompt: str, max_tokens: int = 300) -> str:
     """Call Groq to generate a natural language insight. Returns empty str on failure."""
     try:
         from groq import Groq
-        key = os.getenv("GROQ_API_KEY", "").strip().strip("'\"")
+        import config
+        key = config.get_groq_api_key()
         if not key:
             return ""
         client = Groq(api_key=key)
         resp = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model=config.GROQ_MODELS[0],
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
+            temperature=0.75,
             max_tokens=max_tokens,
+            timeout=5.0,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
@@ -228,11 +231,23 @@ def _comparison_response(
         result_lines.append(insight)
     else:
         if language == 'hi':
-            result_lines.append(f"यहाँ आपके द्वारा चुने गए {dept} ब्रांड्स की तुलना दी गई है:")
+            comp_intros_hi = [
+                f"यहाँ आपके द्वारा चुने गए {dept} ब्रांड्स की तुलना दी गई है:",
+                f"आपके लिए शीर्ष {dept} ब्रांड्स का तुलनात्मक विवरण:",
+                f"यहाँ इन {dept} विकल्पों की आमने-सामने तुलना दी गई है:",
+            ]
+            result_lines.append(random.choice(comp_intros_hi))
         else:
-            result_lines.append(f"Here is a side-by-side comparison of the top {dept} brands you requested:")
+            comp_intros_en = [
+                f"Here is a side-by-side comparison of the top {dept} brands you requested:",
+                f"I've put together a head-to-head comparison of these {dept} options to help you decide:",
+                f"Comparing the key options for {dept} across the requested brands:",
+                f"Here is how these top {dept} picks stack up against each other:",
+                f"Take a look at this brand-by-brand breakdown for your {dept} search:",
+            ]
+            result_lines.append(random.choice(comp_intros_en))
 
-    return '\n'.join(result_lines), all_products
+    return '\n'.join(result_lines), deduplicate_products(all_products)
 
 
 
@@ -250,9 +265,13 @@ def _pairing_response(products: list, ents: dict, query: str) -> str:
             f"Try searching for broader outfit components."
         )
 
-    text = (
-        f"Here are top matching {dept} options curated to pair beautifully with your {color_hint}{pairing_item}:\n\n"
-    )
+    pairing_intros_en = [
+        f"Here are top matching {dept} options curated to pair beautifully with your {color_hint}{pairing_item}:\n\n",
+        f"Check out these stylish {dept} pieces that complement your {color_hint}{pairing_item} wonderfully:\n\n",
+        f"I've selected these versatile {dept} picks to go perfectly with your {color_hint}{pairing_item}:\n\n",
+        f"Here are some great coordinating {dept} options to complete your look with the {color_hint}{pairing_item}:\n\n",
+    ]
+    text = random.choice(pairing_intros_en)
 
     style_tips = {
         'jeans':    "Dark jeans pair best with lighter tops; light jeans work with bold or graphic tees.",
@@ -300,17 +319,39 @@ def _single_best_response(products: list, ents: dict, query: str, language: str 
     rating_s = f" | ⭐ {best['rating']}" if best.get('rating') else ""
 
     if wants_lowest:
+        templates_lowest_hi = [
+            f"सबसे सस्ता उपलब्ध विकल्प {best['title']} है, जिसकी कीमत {best['price_inr']}{rating_s} है।",
+            f"किफायती खरीदारी के लिए, {best['title']} सबसे कम कीमत पर {best['price_inr']}{rating_s} में उपलब्ध है।",
+        ]
+        templates_lowest_en = [
+            f"The cheapest available option is {best['title']} priced at {best['price_inr']}{rating_s}.",
+            f"For the most budget-friendly pick, {best['title']} comes in lowest at {best['price_inr']}{rating_s}.",
+            f"If maximum savings is your goal, {best['title']} is the lowest-priced match at {best['price_inr']}{rating_s}.",
+            f"The most affordable choice right now is {best['title']} at {best['price_inr']}{rating_s}.",
+        ]
         if language == 'hi':
-            return f"सबसे सस्ता उपलब्ध विकल्प {best['title']} है, जिसकी कीमत {best['price_inr']}{rating_s} है।"
+            return random.choice(templates_lowest_hi)
         elif language == 'hinglish':
             return f"Sabse sasta available option {best['title']} hai jo {best['price_inr']}{rating_s} mein available hai."
-        return f"The cheapest available option is {best['title']} priced at {best['price_inr']}{rating_s}."
+        return random.choice(templates_lowest_en)
 
+    templates_single_hi = [
+        f"आपके लिए मेरी शीर्ष सिफारिश {best['title']} है, जिसकी कीमत {best['price_inr']}{rating_s} है।",
+        f"आपके अनुरोध के अनुसार {best['title']} ({best['price_inr']}{rating_s}) सबसे उत्कृष्ट विकल्प है।",
+    ]
+    templates_single_en = [
+        f"My top recommendation for you is the {best['title']} priced at {best['price_inr']}{rating_s}.",
+        f"The standout choice for your request is {best['title']} at {best['price_inr']}{rating_s}—it offers the best overall balance of quality and price.",
+        f"If you're looking for the single best pick, go with {best['title']} ({best['price_inr']}{rating_s}).",
+        f"After analyzing the options, {best['title']} at {best['price_inr']}{rating_s} clearly emerges as the top selection for your needs.",
+        f"I'd strongly suggest {best['title']} ({best['price_inr']}{rating_s}) as your #1 pick in this category.",
+        f"Your best bet is {best['title']} at {best['price_inr']}{rating_s}, offering top-tier performance in this segment.",
+    ]
     if language == 'hi':
-        return f"आपके लिए मेरी शीर्ष सिफारिश {best['title']} है, जिसकी कीमत {best['price_inr']}{rating_s} है।"
+        return random.choice(templates_single_hi)
     elif language == 'hinglish':
         return f"Aapke liye meri top recommendation {best['title']} hai jo {best['price_inr']}{rating_s} mein available hai."
-    return f"My top recommendation for you is the {best['title']} priced at {best['price_inr']}{rating_s}."
+    return random.choice(templates_single_en)
 
 
 # ── Listing response ───────────────────────────────────────────────────────────
@@ -416,17 +457,98 @@ def _listing_response(products: list, ents: dict, intent: str, query: str = "", 
                 return f"सबसे सस्ता {dept} विकल्प {cheapest['title']} है जो {cheapest.get('price_inr', '')} पर उपलब्ध है।{extra_c}"
             return f"The cheapest {dept} available is {cheapest['title']} priced at {cheapest.get('price_inr', '')}.{extra_c}"
 
-    # Fast listing copy
+    # Dynamic conversational listing copy
+    return _generate_dynamic_summary(products, ents, query=query, language=language)
+
+
+def _generate_dynamic_summary(products: list, ents: dict, query: str = "", language: str = "en") -> str:
+    """
+    Generate dynamic, fresh conversational response copy every time, like ChatGPT.
+    Tries Groq LLM with temperature=0.8 for creative natural phrasing, and falls back to
+    a diverse collection of 10+ randomized conversational phrasing angles.
+    """
+    if not products:
+        return ""
+
+    dept = _dept(ents)
     best = products[0]
-    extra = f" A strong next option is {products[1]['title']} at {products[1].get('price_inr', '')}." if len(products) > 1 else ""
+    best_title = best.get('title', 'Top Pick')
+    best_price = best.get('price_inr', '')
+    second = products[1] if len(products) > 1 else None
+    sec_title = second.get('title', '') if second else ''
+    sec_price = second.get('price_inr', '') if second else ''
+
+    # 1. Try Groq for dynamic, creative AI phrasing
+    try:
+        from groq import Groq
+        key = config.get_groq_api_key()
+        if key:
+            client = Groq(api_key=key)
+            prods_summary = "; ".join(f"{p.get('title')} ({p.get('price_inr', '')})" for p in products[:3])
+            prompt = (
+                f"You are a friendly, expert India e-commerce shopping AI assistant.\n"
+                f"User asked: \"{query}\"\n"
+                f"Category: {dept}\n"
+                f"Top products found: {prods_summary}\n\n"
+                f"Write a fresh, natural, engaging 1 to 2 sentence conversational intro for the user.\n"
+                f"Highlight key value, performance, or suitability for their request.\n"
+                f"Every time this runs, use a DIFFERENT conversational opening, tone, and angle so repeated queries get unique, human-like answers like ChatGPT.\n"
+                f"Do NOT use markdown bold asterisks (**). Output ONLY the sentences, no quotes."
+            )
+            resp = client.chat.completions.create(
+                model=config.GROQ_MODELS[0],
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.8,
+                max_tokens=140,
+                timeout=3.5,
+            )
+            content = resp.choices[0].message.content.strip()
+            if content and len(content) > 15:
+                return _strip_markdown_bold(content)
+    except Exception as e:
+        pass
+
+    # 2. Rich, randomized conversational templates (no repetition)
+    extra_variants = [
+        f" Another standout alternative is {sec_title} at {sec_price}." if second else "",
+        f" A strong next option is {sec_title} priced at {sec_price}." if second else "",
+        f" You might also want to consider {sec_title} at {sec_price}." if second else "",
+        f" Followed closely by {sec_title} ({sec_price}), which is also highly rated." if second else "",
+        f" For great variety, {sec_title} at {sec_price} is another top contender." if second else "",
+    ]
+    extra_text = random.choice(extra_variants)
+
     if language == 'hi':
-        result = f"आपके मापदंडों के अनुसार {best['title']} {best.get('price_inr', '')} पर उपलब्ध है।"
-    else:
-        result = (
-            f"Here are live matches for your request. "
-            f"{best['title']} is priced at {best.get('price_inr', '')}.{extra}"
-        )
-    return result
+        templates_hi = [
+            f"आपके अनुरोध के अनुसार शीर्ष विकल्प मिले हैं। सबसे आगे {best_title} है जो {best_price} पर उपलब्ध है।",
+            f"यहाँ आपके लिए बेहतरीन विकल्प हैं! {best_title} ({best_price}) अपनी गुणवत्ता और प्रदर्शन के लिए शानदार है।",
+            f"आपके मापदंडों के अनुसार मैंने सबसे अच्छे विकल्प चुने हैं। {best_title} {best_price} में एक बहुत बढ़िया विकल्प है।",
+            f"यहाँ लाइव उत्पाद उपलब्ध हैं। {best_title} की कीमत {best_price} है और यह एक अत्यधिक अनुशंसित विकल्प है।",
+        ]
+        return random.choice(templates_hi)
+
+    if language == 'hinglish':
+        templates_hinglish = [
+            f"Aapke request ke mutabiq best options mil gaye hain! Sabse aage {best_title} hai jo {best_price} par available hai.{extra_text}",
+            f"Ye rahe aapke search ke top matches. {best_title} ({best_price}) ek kaafi solid choice hai.{extra_text}",
+            f"Maine aapke criteria ke hisaab se best picks nikale hain. {best_title} at {best_price} stands out right now.{extra_text}",
+            f"Here are live matches! {best_title} is priced at {best_price} and is highly recommended.{extra_text}",
+        ]
+        return random.choice(templates_hinglish)
+
+    templates_en = [
+        f"I've rounded up some great options for your search! Leading the lineup is {best_title} at {best_price}.{extra_text}",
+        f"Here are top-rated matches tailored to your request. {best_title} stands out at {best_price} for its solid overall balance of features and value.{extra_text}",
+        f"Based on what you're looking for, {best_title} ({best_price}) is a standout choice in this category.{extra_text}",
+        f"Take a look at these recommended options. {best_title} is currently one of the most compelling picks in this range at {best_price}.{extra_text}",
+        f"Here is a curated selection matching your requirements. {best_title} at {best_price} delivers excellent performance and build.{extra_text}",
+        f"I found these top live matches for you! A leading contender is {best_title} priced at {best_price}.{extra_text}",
+        f"Check out these high-rated picks! {best_title} ({best_price}) is an impressive option that fits your criteria nicely.{extra_text}",
+        f"Here are the best current options for your query. {best_title} at {best_price} offers outstanding bang for your buck.{extra_text}",
+        f"Explore these top recommendations! {best_title} ({best_price}) is leading the pack with stellar feedback.{extra_text}",
+        f"Here's what I found for you! {best_title} is priced at {best_price} and offers a great combination of features and reliability.{extra_text}",
+    ]
+    return random.choice(templates_en)
 
 
 def _multi_item_response(products_by_label: dict, ents: dict) -> tuple[str, list]:
@@ -458,8 +580,10 @@ def _multi_item_response(products_by_label: dict, ents: dict) -> tuple[str, list
             lines.append(f"{label} — No results found.")
         lines.append("")
 
-    lines.append("Mix neutral tones for one piece and let the other be the statement item.")
-    return _strip_markdown_bold('\n'.join(lines)), all_cards
+    fashion_depts = {'Jeans', 'T-Shirts', 'Footwear', 'Shirts', 'Dresses', 'Jackets', 'Ethnic Wear', 'Clothing', 'Office Wear'}
+    if any(label in fashion_depts for label in products_by_label.keys()):
+        lines.append("Mix neutral tones for one piece and let the other be the statement item.")
+    return _strip_markdown_bold('\n'.join(lines)), deduplicate_products(all_cards)
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -480,6 +604,8 @@ def build_response(
                      Used for information and no-search comparison responses.
     language: 'en', 'hi', or 'hinglish'
     """
+    if products:
+        products = deduplicate_products(products)
 
     # ── Information (no product cards) ────────────────────────────────────────
     if intent == 'information':

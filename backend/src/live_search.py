@@ -39,11 +39,85 @@ if hasattr(sys.stderr, 'reconfigure'):
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from src.query_understanding import BRAND_REGISTRY, QueryUnderstanding
+from src.product_constraints import (
+    analyze_budget,
+    catalog_rules,
+    detect_materials,
+    detect_product_type,
+    detect_styles,
+    format_near_budget_message,
+    format_unrealistic_budget_message,
+    generic_category_rules_dict,
+    is_accessory_title,
+    title_matches_category,
+    title_matches_material,
+)
 
 SERPAPI_URL     = "https://serpapi.com/search.json"
 SCRAPINGDOG_URL = "https://api.scrapingdog.com/google_shopping"
 
 DEFAULT_COUNT = 6   # default number of products to return
+
+from src.product_images import (
+    clean_and_verify_product_image,
+    resolve_verified_image,
+    deduplicate_product_images,
+    is_banned_image,
+)
+from src.product_deduplicator import (
+    deduplicate_products,
+    is_duplicate_product,
+    get_canonical_title_key,
+    clean_link_for_dedupe,
+)
+
+# ── Performance Optimizations: Circuit Breakers & Search Cache ──────────────
+_serpapi_cooldown_until: float = 0.0
+_groq_fallback_cooldown_until: float = 0.0
+_SEARCH_CACHE: dict[str, list] = {}  # cache_key -> [ts, pool_of_dicts, diag, offset_index]
+_CACHE_TTL_SECONDS = 900.0  # 15 minutes
+
+def _get_cached_search(cache_key: str, target_n: int = DEFAULT_COUNT, wants_cheapest: bool = False) -> tuple[list[dict], dict] | None:
+    entry = _SEARCH_CACHE.get(cache_key)
+    if entry:
+        ts, pool, diag, offset = entry
+        if time.monotonic() - ts < _CACHE_TTL_SECONDS:
+            if not pool:
+                return [], dict(diag)
+
+            pool_len = len(pool)
+            if pool_len <= target_n:
+                rotated = deduplicate_products([dict(p) for p in pool])
+                if not wants_cheapest and len(rotated) > 1:
+                    shift = (offset + 1) % len(rotated)
+                    entry[3] = shift
+                    rotated = rotated[shift:] + rotated[:shift]
+                return rotated, dict(diag)
+
+            # Advance offset to show DIFFERENT products on subsequent turns
+            step = max(1, target_n // 2) if target_n > 2 else 1
+            current_offset = offset
+            entry[3] = (offset + step) % pool_len
+
+            if wants_cheapest:
+                cheapest = dict(pool[0])
+                rest = [dict(p) for p in pool[1:]]
+                sub_offset = current_offset % len(rest) if rest else 0
+                selected_rest = (rest[sub_offset:] + rest[:sub_offset])[:target_n - 1]
+                return deduplicate_products([cheapest] + selected_rest), dict(diag)
+
+            window = (pool[current_offset:] + pool[:current_offset])[:target_n]
+            return deduplicate_products([dict(p) for p in window]), dict(diag)
+        else:
+            _SEARCH_CACHE.pop(cache_key, None)
+    return None
+
+def _set_cached_search(cache_key: str, pool: list[dict], diag: dict):
+    if len(_SEARCH_CACHE) > 200:
+        oldest = sorted(_SEARCH_CACHE.keys(), key=lambda k: _SEARCH_CACHE[k][0])[:50]
+        for k in oldest:
+            _SEARCH_CACHE.pop(k, None)
+    _SEARCH_CACHE[cache_key] = [time.monotonic(), [dict(p) for p in pool], dict(diag), 0]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -255,11 +329,16 @@ _ACCESSORY_PATTERNS: list[re.Pattern] = [
     re.compile(r'\b(?:cleaning\s*kit|dust\s*plug|anti\s*dust|keyboard\s*skin|keyboard\s*cover|screen\s*guard|screen\s*protector|privacy\s*screen)\b', re.I),
     re.compile(r'\b(?:pen\s*drive|pendrive|flash\s*drive|memory\s*card|microsd|sd\s*card|lga\s*\d+|cpu\s*only|processor\s*only|desktop\s*processor)\b', re.I),
     re.compile(r'\b(?:dummy\s*phone|toy\s*phone|toy\s*laptop|laptop\s*skin|laptop\s*sticker|laptop\s*decal)\b', re.I),
+    re.compile(r'\b(?:(?:replacement|internal|compatible|spare|backup|laptop|notebook|li-ion)\s+batter(?:y|ies)|batter(?:y|ies)\s+for|battery\s+pack|charger\s+for|adapter\s+for|power\s+adapter)\b', re.I),
+    re.compile(r'\b(?:battery\s+for\s+(?:dell|hp|lenovo|asus|acer|macbook|apple|thinkpad|inspiron|pavilion|ideapad|vostro))\b', re.I),
+    re.compile(r'\b(?:replacement\s*(?:part|parts|screen|keyboard|display|panel|battery|motherboard)|keypad\s*replacement)\b', re.I),
 ]
 
 
-def _check_is_accessory(title: str, snippet: str = "") -> bool:
+def _check_is_accessory(title: str, snippet: str = "", requested_category: str | None = None) -> bool:
     """Return True if title indicates an accessory/component rather than the primary product."""
+    if is_accessory_title(title, requested_category) or is_accessory_title(f"{title} {snippet}", requested_category):
+        return True
     combined = f"{title} {snippet}"
     for pat in _ACCESSORY_PATTERNS:
         if pat.search(combined):
@@ -295,6 +374,11 @@ def normalize_raw_item(it: dict, fallback_query: str) -> NormalizedProduct:
     """
     title = str(it.get('title') or '').strip()
     snippet = str(it.get('snippet') or it.get('description') or '').strip()
+    extensions = it.get('extensions') or []
+    if isinstance(extensions, list) and extensions:
+        ext_str = " ".join(str(e) for e in extensions if e)
+        if ext_str:
+            snippet = f"{snippet} {ext_str}".strip() if snippet else ext_str
     combined_text = f"{title} {snippet}"
     source_name = str(it.get('source') or '').strip()
 
@@ -302,8 +386,13 @@ def normalize_raw_item(it: dict, fallback_query: str) -> NormalizedProduct:
     price_num, price_inr = _extract_selling_price(it)
 
     # Link
+    merchant_link = (it.get('merchant') or {}).get('link') if isinstance(it.get('merchant'), dict) else None
+    offer_link = (it.get('offer') or {}).get('link') if isinstance(it.get('offer'), dict) else None
     link = (_valid_link(it.get('link'))
             or _valid_link(it.get('product_link'))
+            or _valid_link(it.get('serpapi_product_api'))
+            or _valid_link(merchant_link)
+            or _valid_link(offer_link)
             or _fallback_link(title or fallback_query, source=source_name))
 
     # Rating & reviews
@@ -328,7 +417,8 @@ def normalize_raw_item(it: dict, fallback_query: str) -> NormalizedProduct:
         detected_brand = res_brand
 
     # Accessory check
-    is_acc = _check_is_accessory(title, snippet)
+    cat_hint = it.get('category') or detect_product_type(fallback_query) or detect_product_type(title)
+    is_acc = _check_is_accessory(title, snippet, requested_category=cat_hint)
 
     # Specs extraction from full product text
     specs = {}
@@ -503,58 +593,9 @@ _AUDIO_CATEGORY_RULES: dict[str, dict[str, list[str]]] = {
     },
 }
 
-# Generic product category definitions
-_GENERIC_CATEGORY_RULES: dict[str, dict[str, list[str]]] = {
-    'laptop': {
-        'pos': ['laptop', 'notebook', 'ultrabook', 'chromebook', 'macbook', 'ideapad',
-                'thinkpad', 'vivobook', 'zenbook', 'pavilion', 'victus', 'tuf gaming',
-                'predator', 'legion', 'loq', 'vostro', 'inspiron'],
-        'neg': ['desktop', 'all-in-one', 'pc cabinet', 'cabinet only', 'motherboard only',
-                'toy laptop', 'laptop bag', 'mouse pad', 'keyboard skin', 'keyboard cover',
-                'skin', 'skins', 'sticker', 'stickers', 'decal', 'decals', 'vinyl cover',
-                'body wrap', 'sleeve only', 'pouch only', 'case only', 'adapter', 'charger',
-                'cooling pad', 'laptop stand'],
-    },
-    'phone': {
-        'pos': ['phone', 'smartphone', 'mobile', 'iphone', 'galaxy', '5g phone'],
-        'neg': ['phone case', 'back cover', 'tempered glass', 'screen protector',
-                'dummy phone', 'toy phone'],
-    },
-    'shoes': {
-        'pos': ['shoes', 'sneakers', 'footwear', 'running shoes', 'sports shoes',
-                'loafers', 'sandals', 'boots', 'casual shoes', 'formal shoes', 'clogs'],
-        'neg': ['shoe polish', 'shoe rack', 'shoe tree', 'shoe bag', 'laces only',
-                'insole only', 'socks', 't-shirt', 'shirt'],
-    },
-    't-shirt': {
-        'pos': ['t-shirt', 'tshirt', 't shirt', 'tee', 'polo t-shirt', 'half sleeve shirt',
-                'graphic shirt', 'round neck shirt', 'crew neck shirt', 'printed shirt',
-                'half-sleeve', 'round neck', 'crew neck'],
-        'neg': ['jeans', 'shoes', 'trouser', 'jacket', 'track pant', 'formal shirt',
-                'full sleeve shirt', 'long sleeve shirt'],
-    },
-    'shirt': {
-        'pos': ['formal shirt', 'casual shirt', 'cotton shirt', 'linen shirt', 'shirt',
-                'full sleeve shirt', 'long sleeve shirt', 'oxford shirt', 'check shirt',
-                'striped shirt'],
-        'neg': ['t-shirt', 'tshirt', 'jeans', 'shoes', 'track pant'],
-    },
-    'jeans': {
-        'pos': ['jeans', 'denim'],
-        'neg': ['shirt', 't-shirt', 'jacket', 'belt only'],
-    },
-    'smartwatch': {
-        'pos': ['smartwatch', 'smart watch', 'fitness band', 'smart band', 'fitness tracker'],
-        'neg': ['wall clock', 'table clock', 'alarm clock', 'watch strap only'],
-    },
-    'watch': {
-        'pos': ['watch', 'wrist watch', 'analog watch', 'digital watch', 'chronograph'],
-        'neg': ['wall clock', 'table clock', 'alarm clock', 'strap only'],
-    },
-    'camera': {
-        'pos': ['camera', 'dslr', 'mirrorless', 'action camera'],
-        'neg': ['camera bag', 'lens cap', 'tripod only', 'strap only'],
-    },
+# Generic product category definitions (catalog is authoritative; extras keep older keys)
+_GENERIC_CATEGORY_RULES: dict[str, dict[str, list[str]]] = generic_category_rules_dict()
+_GENERIC_CATEGORY_RULES.update({
     'office wear': {
         'pos': ['shirt', 'trouser', 'trousers', 'formal', 'blazer', 'suit', 'pants', 'office',
                 'oxford', 'polo', 'chinos', 'waistcoat', 'tie', 'attire', 'dress shirt',
@@ -567,11 +608,7 @@ _GENERIC_CATEGORY_RULES: dict[str, dict[str, list[str]]] = {
                 'wear', 'tee', 'top'],
         'neg': ['shoe polish', 'hanger only', 'cover only'],
     },
-    'trouser': {
-        'pos': ['trouser', 'trousers', 'pants', 'chinos', 'formal pant', 'office pant'],
-        'neg': ['shorts', 'skirt', 'shoe'],
-    },
-}
+})
 
 _CATEGORY_ALIASES = {
     'Clothing_Shoes_and_Jewelry': 'clothing',
@@ -606,13 +643,22 @@ def validate_product(
     title_lower = prod.title.lower()
     desc_lower = prod.description.lower()
     full_text = f"{title_lower} {desc_lower}"
+    cat_key = (target_category or '').lower()
 
     # ── 1. Accessory / Exclusion Filter ───────────────────────────────────────
-    if prod.is_accessory and (target_category or audio_type or want_brands or tech_specs):
-        res.reject('accessory_check', f"Product is an accessory/component, not the requested primary item")
+    if is_accessory_title(prod.title, cat_key or None) or (
+        prod.is_accessory and (target_category or audio_type or want_brands or tech_specs)
+    ):
+        res.reject('accessory_check', "Product is an accessory/component, not the requested primary item")
         return res
     else:
         res.match('accessory_check')
+
+    # Basic keypad / feature phone / car phone / toy phone rejection when searching for smartphones
+    if ('phone' in cat_key or 'mobile' in cat_key) and not any(w in cat_key for w in ('case', 'cover', 'charger', 'holder', 'stand')):
+        if re.search(r'\b(?:keypad\s*(?:mobile|phone)|multimedia\s*keypad|car\s*phone|toy\s*phone|dummy\s*phone|feature\s*phone|basic\s*(?:mobile|phone)|senior\s*citizen\s*phone|i\s*kall\s*k\d+)\b', title_lower):
+            res.reject('category', "Product is a basic keypad/feature/toy phone, not the requested smartphone")
+            return res
 
     # ── 2. Category Validation ────────────────────────────────────────────────
     # Only enforce strict category validation when Category confidence is high (>= 0.70)
@@ -643,6 +689,8 @@ def validate_product(
             rules = _GENERIC_CATEGORY_RULES.get(cat_key) or _GENERIC_CATEGORY_RULES.get(target_category)
             if rules:
                 for excl in rules['neg']:
+                    if cat_key == 'jacket' and excl in ('jeans', 'jean') and re.search(r'\bjacket', title_lower):
+                        continue
                     if re.search(r'\b' + re.escape(excl) + r'(?:s|es)?\b', title_lower):
                         res.reject('category', f"Category mismatch: found excluded term '{excl}' for requested '{target_category}'")
                         return res
@@ -726,6 +774,18 @@ def validate_product(
     if min_price is not None and prod.price_num is not None and prod.price_num > 0:
         if prod.price_num < min_price:
             res.reject('price', f"Price ₹{prod.price_num:,.0f} below min budget of ₹{min_price:,.0f}")
+            return res
+
+    # ── 4b. Price Sanity Floor (Accessories / Replacement Parts Detection) ─────
+    # For high-ticket categories, reject listings priced far below minimum functional price
+    # (e.g. ₹1,352 for a laptop whose typical_min is ₹15,000–18,000 indicates a battery/part)
+    if cat_key in ('laptop', 'laptops', 'notebook', 'macbook') and prod.price_num is not None and prod.price_num > 0:
+        if prod.price_num < 8000:
+            res.reject('accessory_check', f"Price ₹{prod.price_num:,.0f} is far below minimum functional laptop cost — listing is an accessory/part")
+            return res
+    elif (cat_key in ('phone', 'phones', 'smartphone', 'smartphones', 'mobile', 'mobiles', 'mobile phones') or 'phone' in cat_key or 'mobile' in cat_key) and prod.price_num is not None and prod.price_num > 0:
+        if prod.price_num < 2500:
+            res.reject('accessory_check', f"Price ₹{prod.price_num:,.0f} is far below minimum smartphone cost — listing is an accessory/part")
             return res
 
     # ── 5. Hardware Specifications Validation ─────────────────────────────────
@@ -910,6 +970,9 @@ def _rank_validated_products(
         if any(dom in src_lower for dom in _INDIAN_DOMAINS):
             score += 1.5
 
+        # Subtle diversity jitter for products of similar quality so repeat queries rotate
+        score += random.uniform(-0.35, 0.35)
+
         scored.append((score, p))
 
     # Sort descending by total score
@@ -925,6 +988,13 @@ def _get(url: str, params: dict, retries: int = 0, timeout: int = 10):
     for attempt in range(retries + 1):
         try:
             r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code == 429:
+                err_text = ""
+                try:
+                    err_text = r.json().get('error', '')
+                except Exception:
+                    err_text = r.text[:200]
+                raise requests.HTTPError(f"429 Client Error: {err_text}", response=r)
             r.raise_for_status()
             return r
         except Exception as e:
@@ -953,8 +1023,15 @@ def _clean_search_query(q: str) -> str:
     s = re.sub(r'[₹₨]', '', s)
     s = re.sub(r'\bRs\.?\s*', '', s, flags=re.I)
     s = re.sub(r'\b(?:best\s*sellers?|top\s*rated|highly\s*rated|popular|India)\b', '', s, flags=re.I)
-    s = re.sub(r'\b(?:with|having|using|plus)\b', ' ', s, flags=re.I)
+    # Strip conversational connectors and soft preference phrases
+    s = re.sub(r'\b(?:with|having|using|plus|life|battery\s+life|good\s+battery|long\s+battery)\b', ' ', s, flags=re.I)
     s = re.sub(r'\s+', ' ', s).strip()
+    # Deduplicate repeated words while preserving order
+    words = []
+    for w in s.split():
+        if w.lower() not in [x.lower() for x in words]:
+            words.append(w)
+    s = ' '.join(words)
     return s or q
 
 
@@ -979,59 +1056,116 @@ def _extract_shopping_items(data: dict) -> list[dict]:
 def _serpapi(query: str, num: int = 20) -> list[dict]:
     """
     API 1: SerpAPI.
-    Queries Google search first (which consistently returns rich immersive_products in 2-3s).
-    Falls back to google_shopping engine with a short timeout if needed.
+    Queries Google Shopping engine first for rich live product data with direct images, prices & stores.
+    Falls back to Google engine with immersive_products if shopping engine returns empty.
     """
-    if not config.SERPAPI_KEY:
+    global _serpapi_cooldown_until
+    serp_key = config.get_serpapi_key()
+    if not serp_key:
+        return []
+    if time.monotonic() < _serpapi_cooldown_until:
         return []
     clean_q = _clean_search_query(query)
 
-    # 1. Primary: Google search engine (consistently returns immersive_products & shopping deals in 2-3s)
-    params_google = {
-        'engine':   'google',
-        'q':        clean_q,
-        'api_key':  config.SERPAPI_KEY,
-        'gl':       config.COUNTRY,
-        'hl':       config.LANGUAGE,
-    }
-    try:
-        r = _get(SERPAPI_URL, params_google, retries=0, timeout=7.0)
-        if r:
-            items = _extract_shopping_items(r.json())
-            if items:
-                return items
-    except Exception as e:
-        print(f"[SerpAPI google] Fast search error: {e}")
-
-    # 2. Secondary: If google engine had no shopping items, try google_shopping engine with strict 3.5s timeout
+    # 1. Primary: Google Shopping engine (returns direct shopping_results with real product thumbnails)
     params_shopping = {
         'engine':   'google_shopping',
         'q':        clean_q,
-        'api_key':  config.SERPAPI_KEY,
+        'api_key':  serp_key,
         'num':      num,
         'gl':       config.COUNTRY,
         'hl':       config.LANGUAGE,
     }
     try:
-        r = _get(SERPAPI_URL, params_shopping, retries=0, timeout=3.5)
+        r = _get(SERPAPI_URL, params_shopping, retries=0, timeout=16.0)
+        if r:
+            data = r.json()
+            if 'error' in data:
+                err_msg = str(data['error'])
+                if 'verified email' in err_msg.lower():
+                    _serpapi_cooldown_until = time.monotonic() + 30.0
+                    print(f"[SerpAPI] Notice: Email verification required ({err_msg}). Visit https://serpapi.com/users/welcome to enable live searches.")
+                    return []
+            items = _extract_shopping_items(data)
+            if items:
+                return items
+    except Exception as e:
+        err_str = str(e)
+        if 'verified email' in err_str.lower():
+            _serpapi_cooldown_until = time.monotonic() + 30.0
+            print(f"[SerpAPI] Notice: Account email verification required. Visit https://serpapi.com/users/welcome to enable live searches.")
+            return []
+        if any(code in err_str for code in ('429', '401', '403')):
+            _serpapi_cooldown_until = time.monotonic() + 30.0
+            print(f"[SerpAPI] Rate-limited / quota error ({err_str[:80]}). Enabling short cooldown (30s).")
+            return []
+        print(f"[SerpAPI google_shopping] Search error: {e}")
+
+    # 2. Secondary: Fall back to general Google engine if shopping had no results
+    params_google = {
+        'engine':   'google',
+        'q':        clean_q,
+        'api_key':  serp_key,
+        'gl':       config.COUNTRY,
+        'hl':       config.LANGUAGE,
+    }
+    try:
+        r = _get(SERPAPI_URL, params_google, retries=0, timeout=10.0)
         if r:
             items = _extract_shopping_items(r.json())
             if items:
                 return items
     except Exception as e:
-        print(f"[SerpAPI google_shopping] Search skipped/error: {e}")
+        err_str = str(e)
+        if any(code in err_str for code in ('429', '401', '403')):
+            _serpapi_cooldown_until = time.monotonic() + 30.0
+            return []
+        print(f"[SerpAPI google] Search skipped/error: {e}")
     return []
 
 
 _STATIC_FALLBACK_CATALOG: list[dict] = [
-    # Shoes / Footwear / Running Sneakers
+    # Shoes / Footwear / Running Sneakers (Authentic, distinct images per model & brand)
+    {
+        'title': 'Nike Air Zoom Pegasus 38 Running Shoes for Men',
+        'brand': 'Nike', 'price': '₹4,999', 'price_num': 4999.0, 'price_inr': '₹4,999',
+        'rating': 4.5, 'reviews': 3500, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Nike+Air+Zoom+Pegasus+38',
+        'thumbnail': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=500&q=80',
+        'badge': 'Best Seller', 'category': 'shoes', 'dept': 'Footwear',
+        'highlights': ['Nike React Foam Cushioning', 'Breathable Engineered Mesh', 'Zoom Air Forefoot Unit'],
+        'specifications': {'type': 'running', 'gender': 'men'},
+    },
+    {
+        'title': 'Adidas Duramo 9 Running Shoes for Men',
+        'brand': 'Adidas', 'price': '₹3,499', 'price_num': 3499.0, 'price_inr': '₹3,499',
+        'rating': 4.4, 'reviews': 2800, 'source': 'Flipkart',
+        'link': 'https://www.flipkart.com/search?q=Adidas+Duramo+9+Running+Shoes',
+        'thumbnail': 'https://images.unsplash.com/photo-1575537302964-96cd47c06b1b?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1575537302964-96cd47c06b1b?w=500&q=80',
+        'badge': 'Top Pick', 'category': 'shoes', 'dept': 'Footwear',
+        'highlights': ['Cloudfoam Midsole Cushioning', 'Seamless Mesh Upper', 'Adiwear High-Wear Outsole'],
+        'specifications': {'type': 'running', 'gender': 'men'},
+    },
+    {
+        'title': 'Puma Ignite Flash 2 Running Shoes for Men',
+        'brand': 'Puma', 'price': '₹3,999', 'price_num': 3999.0, 'price_inr': '₹3,999',
+        'rating': 4.3, 'reviews': 2600, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Puma+Ignite+Flash+2+Running+Shoes',
+        'thumbnail': 'https://images.unsplash.com/photo-1608231387042-66d1773070a5?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1608231387042-66d1773070a5?w=500&q=80',
+        'badge': 'Pro Runner', 'category': 'shoes', 'dept': 'Footwear',
+        'highlights': ['IGNITE Energy Return Foam', 'evoKNIT Form-Fitting Upper', 'Molded Rubber Heel Clip'],
+        'specifications': {'type': 'running', 'gender': 'men'},
+    },
     {
         'title': 'Puma Flyer Runner Mesh Running Shoes for Men',
         'brand': 'Puma', 'price': '₹1,799', 'price_num': 1799.0, 'price_inr': '₹1,799',
         'rating': 4.3, 'reviews': 12450, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=Puma+Flyer+Runner+Mesh+Running+Shoes',
-        'thumbnail': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1515955656352-a1fa3ffcd111?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1515955656352-a1fa3ffcd111?w=500&q=80',
         'badge': 'Best Seller', 'category': 'shoes', 'dept': 'Footwear',
         'highlights': ['Cushioned SoftFoam+ EVA Midsole', 'Breathable Mesh Upper', 'Optimal Traction Rubber Outsole'],
         'specifications': {'type': 'running', 'gender': 'men'},
@@ -1041,8 +1175,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'Nike', 'price': '₹2,795', 'price_num': 2795.0, 'price_inr': '₹2,795',
         'rating': 4.4, 'reviews': 8920, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=Nike+Revolution+6+Next+Nature+Running+Shoes',
-        'thumbnail': 'https://images.unsplash.com/photo-1608231387042-66d1773070a5?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1608231387042-66d1773070a5?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1600185365483-26d7a4cc7519?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1600185365483-26d7a4cc7519?w=500&q=80',
         'badge': 'Top Rated', 'category': 'shoes', 'dept': 'Footwear',
         'highlights': ['Plush Lightweight Foam Midsole', '100% Recycled Laces', 'Enhanced Flexibility & Grip'],
         'specifications': {'type': 'running', 'gender': 'men'},
@@ -1052,8 +1186,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'Adidas', 'price': '₹2,499', 'price_num': 2499.0, 'price_inr': '₹2,499',
         'rating': 4.3, 'reviews': 6100, 'source': 'Flipkart',
         'link': 'https://www.flipkart.com/search?q=Adidas+Galaxy+6+Running+Shoes',
-        'thumbnail': 'https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1595950653106-6c9ebd614d3a?w=500&q=80',
         'badge': 'Popular Choice', 'category': 'shoes', 'dept': 'Footwear',
         'highlights': ['Cloudfoam Cushioning', 'Breathable Mesh Upper', 'Durable Adiwear Outsole'],
         'specifications': {'type': 'running', 'gender': 'unisex'},
@@ -1063,8 +1197,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'Campus', 'price': '₹1,199', 'price_num': 1199.0, 'price_inr': '₹1,199',
         'rating': 4.2, 'reviews': 15200, 'source': 'Flipkart',
         'link': 'https://www.flipkart.com/search?q=Campus+North+Plus+Running+Shoes',
-        'thumbnail': 'https://images.unsplash.com/photo-1584735935682-2f2b69dff9d2?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1584735935682-2f2b69dff9d2?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1582588678413-dbf45f4823e9?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1582588678413-dbf45f4823e9?w=500&q=80',
         'badge': 'Value Pick', 'category': 'shoes', 'dept': 'Footwear',
         'highlights': ['High-Density Phylon Sole', 'Air-Mesh Breathable Fabric', 'Shock-Absorption Tech'],
         'specifications': {'type': 'running', 'gender': 'men'},
@@ -1074,8 +1208,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'Asics', 'price': '₹3,199', 'price_num': 3199.0, 'price_inr': '₹3,199',
         'rating': 4.4, 'reviews': 4300, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=Asics+Gel-Contend+8+Running+Shoes',
-        'thumbnail': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1584735935682-2f2b69dff9d2?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1584735935682-2f2b69dff9d2?w=500&q=80',
         'badge': 'Pro Choice', 'category': 'shoes', 'dept': 'Footwear',
         'highlights': ['Rearfoot GEL Cushioning', 'AmpliFoam Midsole', 'Solid Rubber Outsole'],
         'specifications': {'type': 'running', 'gender': 'men'},
@@ -1086,8 +1220,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'Acer', 'price': '₹29,990', 'price_num': 29990.0, 'price_inr': '₹29,990',
         'rating': 4.2, 'reviews': 3200, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=Acer+Aspire+Lite+Ryzen+3',
-        'thumbnail': 'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=500&q=80',
         'badge': 'Best Budget Laptop', 'category': 'laptop', 'dept': 'Laptops',
         'highlights': ['AMD Ryzen 3 Quad-Core 5300U', '8GB DDR4 RAM, 512GB NVMe SSD', '15.6" FHD Anti-Glare Display'],
         'specifications': {'cpu': 'ryzen 3', 'ram': '8GB', 'storage': '512GB SSD'},
@@ -1097,8 +1231,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'ASUS', 'price': '₹32,990', 'price_num': 32990.0, 'price_inr': '₹32,990',
         'rating': 4.3, 'reviews': 5500, 'source': 'Flipkart',
         'link': 'https://www.flipkart.com/search?q=ASUS+Vivobook+15+i3+12th+Gen',
-        'thumbnail': 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=500&q=80',
         'badge': 'Top Rated', 'category': 'laptop', 'dept': 'Laptops',
         'highlights': ['Intel Core i3-1215U 6-Core', '8GB RAM & 512GB SSD', 'FHD NanoEdge Display'],
         'specifications': {'cpu': 'i3', 'ram': '8GB', 'storage': '512GB SSD'},
@@ -1108,8 +1242,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'HP', 'price': '₹34,990', 'price_num': 34990.0, 'price_inr': '₹34,990',
         'rating': 4.3, 'reviews': 6800, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=HP+15s+Ryzen+3+7320U',
-        'thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
         'badge': 'Popular Choice', 'category': 'laptop', 'dept': 'Laptops',
         'highlights': ['AMD Ryzen 3 7320U Processor', '8GB LPDDR5 High-Speed RAM', '512GB SSD, Fast Charge'],
         'specifications': {'cpu': 'ryzen 3', 'ram': '8GB', 'storage': '512GB SSD'},
@@ -1120,8 +1254,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'HP', 'price': '₹54,990', 'price_num': 54990.0, 'price_inr': '₹54,990',
         'rating': 4.4, 'reviews': 8500, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=HP+15s+Intel+Core+i5+16GB+RAM+512GB+SSD',
-        'thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
         'badge': 'Top Rated Spec Match', 'category': 'laptop', 'dept': 'Laptops',
         'highlights': ['12th Gen Intel Core i5-1235U 10-Core', '16GB DDR4 RAM, 512GB PCIe NVMe SSD', '15.6" Micro-Edge FHD Display'],
         'specifications': {'cpu': 'i5', 'ram': '16GB', 'storage': '512GB SSD'},
@@ -1131,8 +1265,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'HP', 'price': '₹58,990', 'price_num': 58990.0, 'price_inr': '₹58,990',
         'rating': 4.5, 'reviews': 5100, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=HP+Pavilion+15+Intel+Core+i5+16GB+RAM',
-        'thumbnail': 'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1589561084283-930aa7b1ce50?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1589561084283-930aa7b1ce50?w=500&q=80',
         'badge': 'Premium Choice', 'category': 'laptop', 'dept': 'Laptops',
         'highlights': ['13th Gen Intel Core i5-1335U', '16GB DDR4 RAM & 512GB SSD', 'B&O Audio, Backlit Keyboard'],
         'specifications': {'cpu': 'i5', 'ram': '16GB', 'storage': '512GB SSD'},
@@ -1142,11 +1276,45 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'Lenovo', 'price': '₹52,990', 'price_num': 52990.0, 'price_inr': '₹52,990',
         'rating': 4.3, 'reviews': 7200, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=Lenovo+IdeaPad+Slim+3+Core+i5+16GB',
-        'thumbnail': 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
         'badge': 'Value Pick', 'category': 'laptop', 'dept': 'Laptops',
         'highlights': ['Intel Core i5-1235U 10-Core', '16GB RAM & 512GB SSD', 'Dolby Audio, Rapid Charge'],
         'specifications': {'cpu': 'i5', 'ram': '16GB', 'storage': '512GB SSD'},
+    },
+    # Gaming Laptops
+    {
+        'title': 'Dell G15 5520 Gaming Laptop (Intel Core i5 12500H / 16GB RAM / 512GB SSD / RTX 3050)',
+        'brand': 'Dell', 'price': '₹72,990', 'price_num': 72990.0, 'price_inr': '₹72,990',
+        'rating': 4.4, 'reviews': 4200, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Dell+G15+Gaming+Laptop',
+        'thumbnail': 'https://m.media-amazon.com/images/I/71uw44iKKfL._AC_SX208_CB1169409_QL70_.jpg',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
+        'badge': 'Best Gaming Dell', 'category': 'laptop', 'dept': 'Laptops', 'use_case': 'gaming',
+        'highlights': ['12th Gen Intel Core i5-12500H', 'NVIDIA GeForce RTX 3050 4GB', '120Hz FHD Anti-Glare Screen'],
+        'specifications': {'cpu': 'i5', 'ram': '16GB', 'storage': '512GB SSD', 'use_case': 'gaming'},
+    },
+    {
+        'title': 'HP Victus 15 Gaming Laptop (Intel Core i5 12450H / 16GB RAM / 512GB SSD / RTX 3050)',
+        'brand': 'HP', 'price': '₹68,990', 'price_num': 68990.0, 'price_inr': '₹68,990',
+        'rating': 4.3, 'reviews': 6100, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=HP+Victus+Gaming+Laptop',
+        'thumbnail': 'https://m.media-amazon.com/images/I/71h6PpGaz9L._SX679_.jpg',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1544731612-de292439cc4f?w=500&q=80',
+        'badge': 'Top Value Gaming', 'category': 'laptop', 'dept': 'Laptops', 'use_case': 'gaming',
+        'highlights': ['12th Gen Intel Core i5-12450H', 'NVIDIA GeForce RTX 3050 4GB GDDR6', '144Hz FHD Micro-Edge Display'],
+        'specifications': {'cpu': 'i5', 'ram': '16GB', 'storage': '512GB SSD', 'use_case': 'gaming'},
+    },
+    {
+        'title': 'Lenovo LOQ 15 Gaming Laptop (Intel Core i5 12450HX / 16GB RAM / 512GB SSD / RTX 3050)',
+        'brand': 'Lenovo', 'price': '₹67,990', 'price_num': 67990.0, 'price_inr': '₹67,990',
+        'rating': 4.4, 'reviews': 3800, 'source': 'Flipkart',
+        'link': 'https://www.flipkart.com/search?q=Lenovo+LOQ+Gaming+Laptop',
+        'thumbnail': 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1588872657578-7efd1f1555ed?w=500&q=80',
+        'badge': 'High Performance', 'category': 'laptop', 'dept': 'Laptops', 'use_case': 'gaming',
+        'highlights': ['Intel Core i5-12450HX', 'NVIDIA GeForce RTX 3050 6GB', '144Hz 100% sRGB Display, AI Engine+'],
+        'specifications': {'cpu': 'i5', 'ram': '16GB', 'storage': '512GB SSD', 'use_case': 'gaming'},
     },
     # Audio / Earbuds
     {
@@ -1154,8 +1322,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'boAt', 'price': '₹1,099', 'price_num': 1099.0, 'price_inr': '₹1,099',
         'rating': 4.2, 'reviews': 185000, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=boAt+Airdopes+141',
-        'thumbnail': 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400&q=80',
+        'thumbnail': 'https://m.media-amazon.com/images/I/61KNJav3S9L._SX522_.jpg',
+        'fallback_thumbnail': 'https://m.media-amazon.com/images/I/61+Q6Rh3OQL._SX679_.jpg',
         'badge': '#1 Best Seller', 'category': 'earbuds', 'audio_type': 'earbuds',
         'highlights': ['42H Total Playtime', 'ENx Noise Cancellation Tech', 'ASAP Fast Charge 5min=75min'],
         'specifications': {'type': 'earbuds'},
@@ -1165,8 +1333,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'OnePlus', 'price': '₹1,799', 'price_num': 1799.0, 'price_inr': '₹1,799',
         'rating': 4.4, 'reviews': 45000, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=OnePlus+Nord+Buds+2r',
-        'thumbnail': 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=500&q=80',
         'badge': 'Top Rated', 'category': 'earbuds', 'audio_type': 'earbuds',
         'highlights': ['12.4mm Dynamic Drivers', '38H Playtime', 'Dual Mic AI Noise Cancellation'],
         'specifications': {'type': 'earbuds'},
@@ -1177,8 +1345,8 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'The Souled Store', 'price': '₹799', 'price_num': 799.0, 'price_inr': '₹799',
         'rating': 4.5, 'reviews': 14200, 'source': 'The Souled Store',
         'link': 'https://www.thesouledstore.com/search?q=t-shirt',
-        'thumbnail': 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=500&q=80',
         'badge': 'Fan Favorite', 'category': 't-shirt', 'dept': 'Clothing',
         'highlights': ['100% Combed Cotton', 'Official Merchandise', 'Bio-Washed for Softness'],
         'specifications': {'material': 'cotton', 'sleeve': 'half sleeve'},
@@ -1188,11 +1356,202 @@ _STATIC_FALLBACK_CATALOG: list[dict] = [
         'brand': 'Allen Solly', 'price': '₹899', 'price_num': 899.0, 'price_inr': '₹899',
         'rating': 4.3, 'reviews': 21000, 'source': 'Amazon.in',
         'link': 'https://www.amazon.in/s?k=Allen+Solly+Polo+T-Shirt',
-        'thumbnail': 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=400&q=80',
-        'fallback_thumbnail': 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=400&q=80',
+        'thumbnail': 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=500&q=80',
         'badge': 'Classic Pick', 'category': 't-shirt', 'dept': 'Clothing',
         'highlights': ['Pure Breathable Cotton Pique', 'Ribbed Collar and Armbands', 'Durable Color Fastness'],
         'specifications': {'material': 'cotton', 'type': 'polo'},
+    },
+    # Smartphones (< 20k)
+    {
+        'title': 'Xiaomi Redmi Note 12 5G (6GB RAM / 128GB Storage, 5000mAh Battery)',
+        'brand': 'Xiaomi', 'price': '₹16,999', 'price_num': 16999.0, 'price_inr': '₹16,999',
+        'rating': 4.3, 'reviews': 24000, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Redmi+Note+12+5G',
+        'thumbnail': 'https://m.media-amazon.com/images/I/71d1ytcCntL._SX679_.jpg',
+        'fallback_thumbnail': 'https://m.media-amazon.com/images/I/71H5UpnFA2L._AC_SX208_CB1169409_QL70_.jpg',
+        'badge': '#1 Best Seller', 'category': 'phone', 'dept': 'Mobile Phones',
+        'highlights': ['Snapdragon 4 Gen 1 5G', '120Hz Super AMOLED Display', '5000mAh Battery with 33W Fast Charge'],
+        'specifications': {'ram': '6GB', 'storage': '128GB', 'battery': '5000mAh'},
+    },
+    {
+        'title': 'Realme 10 Pro 5G (8GB RAM / 128GB Storage, 5000mAh Battery)',
+        'brand': 'Realme', 'price': '₹18,999', 'price_num': 18999.0, 'price_inr': '₹18,999',
+        'rating': 4.3, 'reviews': 18200, 'source': 'Flipkart',
+        'link': 'https://www.flipkart.com/search?q=Realme+10+Pro+5G',
+        'thumbnail': 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=500&q=80',
+        'badge': 'Top Rated', 'category': 'phone', 'dept': 'Mobile Phones',
+        'highlights': ['Snapdragon 695 5G Processor', '108MP ProLight Camera', '120Hz Boundless Display, 5000mAh'],
+        'specifications': {'ram': '8GB', 'storage': '128GB', 'battery': '5000mAh'},
+    },
+    {
+        'title': 'Samsung Galaxy M34 5G (6GB RAM / 128GB Storage, 6000mAh Battery)',
+        'brand': 'Samsung', 'price': '₹15,999', 'price_num': 15999.0, 'price_inr': '₹15,999',
+        'rating': 4.2, 'reviews': 32000, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Samsung+Galaxy+M34+5G',
+        'thumbnail': 'https://images.unsplash.com/photo-1610945265064-0e34e5519bbf?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1610945265064-0e34e5519bbf?w=500&q=80',
+        'badge': 'Monster Battery', 'category': 'phone', 'dept': 'Mobile Phones',
+        'highlights': ['Massive 6000mAh Long Battery', '120Hz Super AMOLED Screen', '50MP No Shake OIS Camera'],
+        'specifications': {'ram': '6GB', 'storage': '128GB', 'battery': '6000mAh'},
+    },
+    {
+        'title': 'Motorola Moto G82 5G (6GB RAM / 128GB Storage, 5000mAh Battery)',
+        'brand': 'Motorola', 'price': '₹17,999', 'price_num': 17999.0, 'price_inr': '₹17,999',
+        'rating': 4.2, 'reviews': 12500, 'source': 'Flipkart',
+        'link': 'https://www.flipkart.com/search?q=Motorola+Moto+G82+5G',
+        'thumbnail': 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=500&q=80',
+        'badge': 'Best Clean OS', 'category': 'phone', 'dept': 'Mobile Phones',
+        'highlights': ['pOLED 120Hz FHD+ Display', 'Stereo Speakers Dolby Atmos', '50MP OIS Camera, 5000mAh'],
+        'specifications': {'ram': '6GB', 'storage': '128GB', 'battery': '5000mAh'},
+    },
+    {
+        'title': 'OnePlus Nord CE 3 Lite 5G (8GB RAM / 128GB Storage, 5000mAh Battery)',
+        'brand': 'OnePlus', 'price': '₹19,999', 'price_num': 19999.0, 'price_inr': '₹19,999',
+        'rating': 4.4, 'reviews': 41000, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=OnePlus+Nord+CE+3+Lite+5G',
+        'thumbnail': 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=500&q=80',
+        'badge': 'Popular Choice', 'category': 'phone', 'dept': 'Mobile Phones',
+        'highlights': ['67W SUPERVOOC Fast Endurance', '108MP Camera System', 'Snapdragon 695 5G Chipset'],
+        'specifications': {'ram': '8GB', 'storage': '128GB', 'battery': '5000mAh'},
+    },
+    # Jackets / Winter Wear
+    {
+        'title': "Woodland Men's Solid Casual Winter Jacket",
+        'brand': 'Woodland', 'price': '₹3,495', 'price_num': 3495.0, 'price_inr': '₹3,495',
+        'rating': 4.4, 'reviews': 1850, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Woodland+Mens+Winter+Jacket',
+        'thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/13647466/2021/4/26/d5b5eb02-f04b-4a33-85f0-61baea3179291619420076296-Woodland-Men-Jackets-8741619420075591-1.jpg',
+        'fallback_thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/13647466/2021/4/26/d5b5eb02-f04b-4a33-85f0-61baea3179291619420076296-Woodland-Men-Jackets-8741619420075591-1.jpg',
+        'badge': 'Premium Winter Pick', 'category': 'jacket', 'dept': 'Jackets',
+        'highlights': ['Water-Resistant Outer Shell', 'Thermal Polyfill Insulation', 'Detachable Hood'],
+        'specifications': {'type': 'winter jacket', 'gender': 'men'},
+    },
+    {
+        'title': "Columbia Men's Steens Mountain Full Zip Fleece Jacket",
+        'brand': 'Columbia', 'price': '₹4,999', 'price_num': 4999.0, 'price_inr': '₹4,999',
+        'rating': 4.6, 'reviews': 3200, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Columbia+Mens+Steens+Mountain+Fleece+Jacket',
+        'thumbnail': 'https://m.media-amazon.com/images/I/71Y8T1q-ZBL._AC_UL640_QL65_.jpg',
+        'fallback_thumbnail': 'https://m.media-amazon.com/images/I/71Y8T1q-ZBL._AC_UL640_QL65_.jpg',
+        'badge': 'Best Warmth', 'category': 'jacket', 'dept': 'Jackets',
+        'highlights': ['MTR Filament Fleece 250g', 'Classic Modern Fit', 'Zippered Security Pockets'],
+        'specifications': {'type': 'fleece jacket', 'gender': 'men'},
+    },
+    {
+        'title': "The North Face Men's ThermoBall Eco Winter Jacket",
+        'brand': 'The North Face', 'price': '₹7,999', 'price_num': 7999.0, 'price_inr': '₹7,999',
+        'rating': 4.7, 'reviews': 1500, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=The+North+Face+ThermoBall+Eco+Jacket',
+        'thumbnail': 'https://images.unsplash.com/photo-1544923246-77307dd654cb?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1544923246-77307dd654cb?w=500&q=80',
+        'badge': 'Flagship Winter Wear', 'category': 'jacket', 'dept': 'Jackets',
+        'highlights': ['100% Recycled ThermoBall Insulation', 'Windproof & Lightweight', 'Packs into Chest Pocket'],
+        'specifications': {'type': 'insulated jacket', 'gender': 'men'},
+    },
+    # Office Wear / Formal Apparel (< ₹1,500)
+    {
+        'title': "Peter England Men Classic Formal Plain Cotton Shirt",
+        'brand': 'Peter England', 'price': '₹1,199', 'price_num': 1199.0, 'price_inr': '₹1,199',
+        'rating': 4.3, 'reviews': 5400, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Peter+England+Men+Classic+Formal+Shirt',
+        'thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/1865801/2017/6/5/11496660147614-Peter-England-Men-Shirts-8461496660147398-1.jpg',
+        'fallback_thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/1865801/2017/6/5/11496660147614-Peter-England-Men-Shirts-8461496660147398-1.jpg',
+        'badge': 'Best Formal Shirt', 'category': 'office wear', 'dept': 'Office Wear',
+        'highlights': ['100% Pure Breathable Cotton', 'Wrinkle-Resistant Easy Care', 'Classic Regular Fit'],
+        'specifications': {'fabric': '100% Cotton', 'type': 'formal shirt', 'gender': 'men'},
+    },
+    {
+        'title': "Van Heusen Men Formal Slim Fit Cotton Shirt",
+        'brand': 'Van Heusen', 'price': '₹1,299', 'price_num': 1299.0, 'price_inr': '₹1,299',
+        'rating': 4.4, 'reviews': 4200, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Van+Heusen+Men+Formal+Slim+Fit+Shirt',
+        'thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/10356511/2019/8/8/9f0be89a-01c0-4f51-b8f2-8411b93f1fa61565261439706-Van-Heusen-Men-Shirts-7591565261438760-1.jpg',
+        'fallback_thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/10356511/2019/8/8/9f0be89a-01c0-4f51-b8f2-8411b93f1fa61565261439706-Van-Heusen-Men-Shirts-7591565261438760-1.jpg',
+        'badge': 'Executive Choice', 'category': 'office wear', 'dept': 'Office Wear',
+        'highlights': ['Premium Compact Cotton Twill', 'Formal Spread Collar', 'Slim Tailored Fit'],
+        'specifications': {'fabric': 'Cotton Twill', 'type': 'formal shirt', 'gender': 'men'},
+    },
+    {
+        'title': "Allen Solly Men Formal Cotton Chino Trousers",
+        'brand': 'Allen Solly', 'price': '₹1,399', 'price_num': 1399.0, 'price_inr': '₹1,399',
+        'rating': 4.3, 'reviews': 3800, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Allen+Solly+Men+Formal+Trousers',
+        'thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/11391306/2020/2/12/32d0c2ee-fb8c-4ec8-b617-6d2c49dbe8021581498774780-Allen-Solly-Men-Trousers-7831581498773384-1.jpg',
+        'fallback_thumbnail': 'https://assets.myntassets.com/h_1440,q_90,w_1080/v1/assets/images/11391306/2020/2/12/32d0c2ee-fb8c-4ec8-b617-6d2c49dbe8021581498774780-Allen-Solly-Men-Trousers-7831581498773384-1.jpg',
+        'badge': 'Top Rated Formal Trouser', 'category': 'office wear', 'dept': 'Office Wear',
+        'highlights': ['Stretch Cotton Twill Fabric', 'Flat Front Smart Silhouette', 'Brass Rivet Pocket Reinforcements'],
+        'specifications': {'fabric': 'Cotton Stretch', 'type': 'formal trouser', 'gender': 'men'},
+    },
+    # Backpacks & College Bags (< ₹2,500)
+    {
+        'title': 'American Tourister 32 Ltr Black Casual Backpack',
+        'brand': 'American Tourister', 'price': '₹1,299', 'price_num': 1299.0, 'price_inr': '₹1,299',
+        'rating': 4.3, 'reviews': 14500, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=American+Tourister+Casual+Backpack',
+        'thumbnail': 'https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=500&q=80',
+        'badge': 'Best Seller', 'category': 'bag', 'dept': 'Bags',
+        'highlights': ['Lightweight & Durable Polyester', 'Water Resistant Fabric', 'Padded Shoulder Straps'],
+        'specifications': {'type': 'college backpack', 'capacity': '32L', 'waterproof': 'Yes'},
+    },
+    {
+        'title': 'Skybags Brat 30L Casual Waterproof College Backpack',
+        'brand': 'Skybags', 'price': '₹999', 'price_num': 999.0, 'price_inr': '₹999',
+        'rating': 4.2, 'reviews': 8900, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Skybags+Brat+Casual+Backpack',
+        'thumbnail': 'https://images.unsplash.com/photo-1622560480605-d83c853bc5c3?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1622560480605-d83c853bc5c3?w=500&q=80',
+        'badge': 'Top Pick', 'category': 'bag', 'dept': 'Bags',
+        'highlights': ['Water Repellent Coating', 'Spacious 3 Main Compartments', 'Air Mesh Back Padding'],
+        'specifications': {'type': 'college backpack', 'capacity': '30L', 'waterproof': 'Yes'},
+    },
+    {
+        'title': 'Wildcraft 35L Work & College Casual Backpack',
+        'brand': 'Wildcraft', 'price': '₹1,899', 'price_num': 1899.0, 'price_inr': '₹1,899',
+        'rating': 4.4, 'reviews': 11200, 'source': 'Flipkart',
+        'link': 'https://www.flipkart.com/search?q=Wildcraft+College+Backpack',
+        'thumbnail': 'https://images.unsplash.com/photo-1546938576-6e6a64f317cc?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1546938576-6e6a64f317cc?w=500&q=80',
+        'badge': 'High Durability', 'category': 'bag', 'dept': 'Bags',
+        'highlights': ['Abrasion Resistant Nylon', 'Ergonomic Ventex Back System', 'Waterproof Rain Cover Included'],
+        'specifications': {'type': 'college backpack', 'capacity': '35L', 'waterproof': 'Yes'},
+    },
+    {
+        'title': 'Safari Seek 35 Ltr Water Resistant College Backpack',
+        'brand': 'Safari', 'price': '₹1,499', 'price_num': 1499.0, 'price_inr': '₹1,499',
+        'rating': 4.3, 'reviews': 6700, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Safari+Seek+Backpack',
+        'thumbnail': 'https://images.unsplash.com/photo-1577733966973-d680bffd2e80?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1577733966973-d680bffd2e80?w=500&q=80',
+        'badge': 'Value for Money', 'category': 'bag', 'dept': 'Bags',
+        'highlights': ['Multi-Level Organizer', 'Rain Cover Included', 'Bottle Pockets & Tech Sleeve'],
+        'specifications': {'type': 'college backpack', 'capacity': '35L', 'waterproof': 'Yes'},
+    },
+    {
+        'title': 'Gear Classic 20L Faux Leather College Backpack',
+        'brand': 'Gear', 'price': '₹1,199', 'price_num': 1199.0, 'price_inr': '₹1,199',
+        'rating': 4.2, 'reviews': 5400, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Gear+Classic+Backpack',
+        'thumbnail': 'https://images.unsplash.com/photo-1581605405669-fcdf81165afa?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1581605405669-fcdf81165afa?w=500&q=80',
+        'badge': 'Stylish Pick', 'category': 'bag', 'dept': 'Bags',
+        'highlights': ['Waterproof Fabric Exterior', 'Anti-Theft Hidden Pocket', 'Ultra Lightweight Build'],
+        'specifications': {'type': 'college backpack', 'capacity': '20L', 'waterproof': 'Yes'},
+    },
+    {
+        'title': 'Arctic Fox Slope 30L Water Resistant Backpack',
+        'brand': 'Arctic Fox', 'price': '₹2,199', 'price_num': 2199.0, 'price_inr': '₹2,199',
+        'rating': 4.5, 'reviews': 3400, 'source': 'Amazon.in',
+        'link': 'https://www.amazon.in/s?k=Arctic+Fox+Slope+Backpack',
+        'thumbnail': 'https://images.unsplash.com/photo-1547949003-9792a18a2601?w=500&q=80',
+        'fallback_thumbnail': 'https://images.unsplash.com/photo-1547949003-9792a18a2601?w=500&q=80',
+        'badge': 'Premium Design', 'category': 'bag', 'dept': 'Bags',
+        'highlights': ['Attached Rain Cover & Waterproof Zippers', 'Padded 15.6 Inch Laptop Sleeve', 'Ergonomic Shoulder Straps'],
+        'specifications': {'type': 'college backpack', 'capacity': '30L', 'waterproof': 'Yes'},
     },
 ]
 
@@ -1221,10 +1580,18 @@ def _get_static_catalog_fallback(query: str, ents: dict, count: int = 4) -> list
             is_cat_match = (p_cat == 'laptop')
         elif audio in ('earbuds', 'earphones', 'headphones') or any(w in q_l for w in ('earbud', 'headphone', 'audio')):
             is_cat_match = (p_cat == 'earbuds' or p_audio == 'earbuds')
+        elif cat in ('jacket', 'jackets', 'coat', 'winter wear') or any(w in q_l for w in ('jacket', 'coat', 'winter wear')):
+            is_cat_match = (p_cat == 'jacket')
+        elif cat in ('office wear', 'formal wear') or any(w in q_l for w in ('office wear', 'formal wear')):
+            is_cat_match = (p_cat in ('office wear', 'shirt', 'trouser'))
         elif cat in ('t-shirt', 'shirt', 'clothing', 'apparel') or any(w in q_l for w in ('t-shirt', 'tshirt', 'shirt', 'clothing')):
-            is_cat_match = (p_cat in ('t-shirt', 'shirt', 'clothing'))
+            is_cat_match = (p_cat in ('t-shirt', 'shirt', 'clothing', 'office wear'))
+        elif cat in ('phone', 'phones', 'smartphone', 'smartphones', 'mobile') or any(w in q_l for w in ('phone', 'smartphone', 'mobile')):
+            is_cat_match = (p_cat == 'phone')
+        elif cat in ('bag', 'bags', 'backpack', 'backpacks', 'luggage') or any(w in q_l for w in ('bag', 'backpack', 'college backpack')):
+            is_cat_match = (p_cat in ('bag', 'backpack'))
         else:
-            is_cat_match = (p_cat == cat or p_cat in q_l or any(w in p_title for w in q_l.split()))
+            is_cat_match = (p_cat == cat or (p_cat and p_cat in q_l))
 
         if not is_cat_match:
             continue
@@ -1240,6 +1607,12 @@ def _get_static_catalog_fallback(query: str, ents: dict, count: int = 4) -> list
 
         matched.append(dict(p))
 
+    # If gaming was specifically requested, prioritize gaming laptops
+    if 'gaming' in q_l or ents.get('use_case') == 'gaming':
+        gaming_items = [p for p in matched if p.get('use_case') == 'gaming' or 'gaming' in p.get('title', '').lower()]
+        if gaming_items:
+            matched = gaming_items
+
     # If brand filter had 0 matches, relax brand
     if not matched and want_brands:
         for p in _STATIC_FALLBACK_CATALOG:
@@ -1250,15 +1623,26 @@ def _get_static_catalog_fallback(query: str, ents: dict, count: int = 4) -> list
                 matched.append(dict(p))
 
     if not matched:
-        matched = [dict(p) for p in _STATIC_FALLBACK_CATALOG[:count]]
+        if cat and cat not in ('shoes', 'footwear', 'sneakers'):
+            # Strictly do NOT substitute shoes for non-footwear categories (laptops, trousers, etc.)
+            cat_matched = [dict(p) for p in _STATIC_FALLBACK_CATALOG if (p.get('category') or '').lower() == cat]
+            matched = cat_matched if cat_matched else []
+        else:
+            matched = [dict(p) for p in _STATIC_FALLBACK_CATALOG[:count]]
 
     # If max_price was given and we have items within budget, filter to in-budget first
     if max_price is not None:
         in_budget = [p for p in matched if (p.get('price_num') or 0) <= max_price]
         if in_budget:
-            return in_budget[:count]
+            if len(in_budget) > count:
+                start_idx = random.randint(0, len(in_budget) - 1)
+                in_budget = in_budget[start_idx:] + in_budget[:start_idx]
+            return deduplicate_product_images(in_budget[:count])
 
-    return matched[:count]
+    if len(matched) > count:
+        start_idx = random.randint(0, len(matched) - 1)
+        matched = matched[start_idx:] + matched[:start_idx]
+    return deduplicate_product_images(matched[:count])
 
 
 def _groq_product_fallback(query: str, ents: dict, count: int = 4) -> list[dict]:
@@ -1270,27 +1654,74 @@ def _groq_product_fallback(query: str, ents: dict, count: int = 4) -> list[dict]
     category = ents.get('category') or ents.get('dept') or 'apparel'
     gender = ents.get('gender') or ''
     max_price = ents.get('max_price')
-    price_clause = f"under ₹{max_price}" if max_price else "affordable"
+    price_clause = f"under ₹{max_price:,}" if max_price else "affordable"
+
+    # Collect all constraints for the prompt
+    tech_specs = ents.get('tech_specs') or {}
+    materials = ents.get('materials') or []
+    brands = ents.get('brands') or []
+    audio_type = ents.get('audio_type') or ''
+
+    # Build constraint description
+    constraints_parts = []
+    if brands:
+        constraints_parts.append(f"Brand: {', '.join(brands)}")
+    if audio_type:
+        constraints_parts.append(f"Audio type: {audio_type} (ONLY {audio_type} — never substitute with other audio products)")
+    if materials:
+        constraints_parts.append(f"Material/Fabric: {', '.join(materials)} (REQUIRED — every product MUST use this material)")
+    if tech_specs.get('cpu') or tech_specs.get('processor'):
+        constraints_parts.append(f"Processor: {tech_specs.get('cpu') or tech_specs.get('processor')} (REQUIRED)")
+    if tech_specs.get('ram'):
+        constraints_parts.append(f"RAM: {tech_specs['ram']} (REQUIRED)")
+    if tech_specs.get('storage'):
+        constraints_parts.append(f"Storage: {tech_specs['storage']} (REQUIRED)")
+    if tech_specs.get('battery'):
+        constraints_parts.append(f"Battery: {tech_specs['battery']} (REQUIRED)")
+    if tech_specs.get('camera'):
+        constraints_parts.append(f"Camera: {tech_specs['camera']} (REQUIRED)")
+    if tech_specs.get('display'):
+        constraints_parts.append(f"Display: {tech_specs['display']} (REQUIRED)")
+    if gender:
+        constraints_parts.append(f"Target gender: {gender}")
+
+    constraints_str = '\n'.join(f"- {c}" for c in constraints_parts) if constraints_parts else "- No additional constraints"
+
+    global _groq_fallback_cooldown_until
+    if time.monotonic() < _groq_fallback_cooldown_until:
+        return _get_static_catalog_fallback(query, ents, count=count)
 
     if config.GROQ_API_KEY:
         models_to_try = [
-            "llama-3.3-70b-versatile",
+            "qwen/qwen3.8-27b",
+            "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
-            "llama-3.1-8b-instant",
         ]
-        
+
         prompt = f"""You are a shopping product retrieval assistant for Indian e-commerce (Amazon India, Flipkart, Myntra).
-Generate {count} realistic, popular real-world products currently sold in India matching:
+Generate {count} realistic, popular real-world products currently sold in India matching ALL these requirements:
+
 User Query: "{query}"
 Target Category: "{category}"
-Gender: "{gender}"
 Budget: "{price_clause}"
+
+REQUIRED CONSTRAINTS (every product MUST satisfy ALL of these):
+{constraints_str}
+
+CRITICAL RULES:
+1. NEVER substitute a different product category. If user wants a laptop, only generate laptops.
+2. NEVER ignore material/fabric. If cotton is required, every product title MUST mention cotton.
+3. NEVER ignore processor specs. If i5 is required, every product MUST have Intel Core i5.
+4. NEVER ignore RAM/storage. If 16GB RAM is required, every product MUST have 16GB RAM.
+5. If budget is unrealistic for the category, generate the cheapest realistic option anyway.
+6. Products must be from real Indian brands available on Amazon India/Flipkart.
+7. Generate DIFFERENT products — avoid repeating the same model.
 
 Output valid JSON ONLY with this schema:
 {{
   "products": [
     {{
-      "title": "Full product title with brand, style, and fabric/specs",
+      "title": "Full product title with brand, specs/fabric, and model",
       "brand": "Brand Name",
       "price": "₹799",
       "price_num": 799,
@@ -1298,7 +1729,7 @@ Output valid JSON ONLY with this schema:
       "reviews": 1250,
       "source": "Amazon.in",
       "badge": "Top Rated",
-      "highlights": ["Key highlight 1", "Key highlight 2"]
+      "highlights": ["Key highlight 1 with spec details", "Key highlight 2"]
     }}
   ]
 }}
@@ -1311,9 +1742,14 @@ Output valid JSON ONLY with this schema:
             try:
                 resp = client.chat.completions.create(
                     model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": "You are a fast shopping JSON generator for Indian e-commerce. Output valid JSON strictly matching requirements without unnecessary reasoning."},
+                        {"role": "user", "content": prompt}
+                    ],
                     response_format={"type": "json_object"},
-                    timeout=7,
+                    max_tokens=800,
+                    temperature=0.2,
+                    timeout=5.0,
                 )
                 data = json.loads(resp.choices[0].message.content)
                 products = data.get('products', [])
@@ -1321,6 +1757,7 @@ Output valid JSON ONLY with this schema:
                     continue
 
                 out = []
+                seen_fallback_images: set[str] = set()
                 for p in products[:count]:
                     title = p.get('title', '')
                     p_num = p.get('price_num') or _parse_num(p.get('price', ''))
@@ -1336,20 +1773,9 @@ Output valid JSON ONLY with this schema:
                     else:
                         link = f"https://www.amazon.in/s?k={query_param}"
 
-                    default_cat_img = ""
-                    cat_l = (category or '').lower()
-                    if any(w in cat_l for w in ('shirt', 'office', 'wear', 'cloth', 'apparel', 'formal')):
-                        default_cat_img = "https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=400&q=80"
-                    elif any(w in cat_l for w in ('shoe', 'sneaker', 'footwear', 'running')):
-                        default_cat_img = "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=400&q=80"
-                    elif any(w in cat_l for w in ('earbud', 'headphone', 'audio', 'earphone')):
-                        default_cat_img = "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400&q=80"
-                    elif any(w in cat_l for w in ('laptop', 'notebook')):
-                        default_cat_img = "https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=400&q=80"
-                    elif any(w in cat_l for w in ('phone', 'mobile')):
-                        default_cat_img = "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=400&q=80"
-                    else:
-                        default_cat_img = "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=400&q=80"
+                    verified_img = resolve_verified_image(title, p.get('brand', ''), category, seen_images=seen_fallback_images)
+                    if verified_img:
+                        seen_fallback_images.add(verified_img)
 
                     out.append({
                         'title': title,
@@ -1361,9 +1787,12 @@ Output valid JSON ONLY with this schema:
                         'reviews': p.get('reviews', 850),
                         'source': source,
                         'link': link,
-                        'thumbnail': default_cat_img,
-                        'fallback_thumbnail': default_cat_img,
-                        'image': default_cat_img,
+                        'thumbnail': verified_img,
+                        'fallback_thumbnail': verified_img,
+                        'serpapi_thumbnail': verified_img,
+                        'image': verified_img,
+                        'has_real_image': bool(verified_img),
+                        'is_placeholder': not bool(verified_img),
                         'badge': p.get('badge', 'Top Rated'),
                         'highlights': p.get('highlights', []),
                         'category': category,
@@ -1371,7 +1800,7 @@ Output valid JSON ONLY with this schema:
                         'is_fallback': True,
                     })
                 if out:
-                    return out
+                    return deduplicate_product_images(out)
             except Exception as e:
                 print(f"[Groq Product Fallback] Model {model_name} failed: {e}")
                 continue
@@ -1408,16 +1837,25 @@ def _scrapingdog(query: str, num: int = 20) -> list[dict]:
 
 
 def _dedupe_raw_items(items: list[dict]) -> list[dict]:
-    seen: set[str] = set()
+    seen_links: set[str] = set()
+    seen_keys: set[str] = set()
     out: list[dict] = []
     for it in items:
         if not isinstance(it, dict):
             continue
-        key = str(it.get('product_link') or it.get('link') or it.get('title') or '')
-        key = key.strip().lower()
-        if not key or key in seen:
+        link = clean_link_for_dedupe(it.get('product_link') or it.get('link'))
+        title = str(it.get('title') or '').strip()
+        if not title:
             continue
-        seen.add(key)
+        ck = get_canonical_title_key(title, str(it.get('brand') or ''))
+        if ck and ck in seen_keys:
+            continue
+        if link and link in seen_links:
+            continue
+        if ck:
+            seen_keys.add(ck)
+        if link:
+            seen_links.add(link)
         out.append(it)
     return out
 
@@ -1447,7 +1885,8 @@ def _fetch_from_search_apis(query: str, fetch_n: int) -> list[dict]:
     pool = ThreadPoolExecutor(max_workers=2)
     pending = set()
     labels = {}
-    if config.SERPAPI_KEY:
+    serp_key = config.get_serpapi_key()
+    if serp_key and time.monotonic() >= _serpapi_cooldown_until:
         fut = pool.submit(_fetch_serp)
         pending.add(fut)
         labels[fut] = 'serp'
@@ -1459,13 +1898,13 @@ def _fetch_from_search_apis(query: str, fetch_n: int) -> list[dict]:
         pool.shutdown(wait=False, cancel_futures=True)
         return []
 
-    deadline = time.monotonic() + 7.0
+    deadline = time.monotonic() + 20.0
     serp_grace_until = None
     try:
         while pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                print("[Search] Live fetch window ended (7s) — using whatever arrived.")
+                print("[Search] Live fetch window ended (20s) — using whatever arrived.")
                 break
             wait_for = remaining
             if serp_grace_until is not None and dog_items and not serp_done:
@@ -1503,7 +1942,7 @@ def _fetch_from_search_apis(query: str, fetch_n: int) -> list[dict]:
                     dog_items = results
                     if dog_items:
                         print(f"[Search] ScrapingDog returned {len(dog_items)} items.")
-                        if not serp_done and config.SERPAPI_KEY:
+                        if not serp_done and serp_key:
                             serp_grace_until = time.monotonic() + 1.2
                         elif serp_done:
                             pending.clear()
@@ -1575,9 +2014,10 @@ def _relax_existing_candidates(
         )
         return [p.to_dict() for p in ranked[:top_n]]
 
+    effective_conf = max(cat_conf, 0.85) if category else min(cat_conf, 0.70)
     for kwargs in (
-        {'want_brands': brands or [], 'price_max': max_price, 'want_gender': gender, 'conf': min(cat_conf, 0.70)},
-        {'want_brands': [], 'price_max': max_price, 'want_gender': gender, 'conf': 0.70},
+        {'want_brands': brands or [], 'price_max': max_price, 'want_gender': gender, 'conf': effective_conf},
+        {'want_brands': [], 'price_max': max_price, 'want_gender': gender, 'conf': effective_conf},
     ):
         out = _run(kwargs['want_brands'], kwargs['price_max'], kwargs['want_gender'], kwargs['conf'])
         if out:
@@ -1585,13 +2025,20 @@ def _relax_existing_candidates(
 
     # If category is known, ensure category keyword is strictly matched and accessories excluded
     if category:
-        cat_rule = _GENERIC_CATEGORY_RULES.get(category)
+        cat_key = _CATEGORY_ALIASES.get(category, category)
+        cat_rule = _GENERIC_CATEGORY_RULES.get(cat_key) or _GENERIC_CATEGORY_RULES.get(category)
         if cat_rule:
             matched = []
             for p in clean_candidates:
                 t_l = p.title.lower()
-                has_pos = any(pos in t_l for pos in cat_rule['pos'])
-                has_neg = any(neg in t_l for neg in cat_rule['neg'])
+                has_pos = any(re.search(r'\b' + re.escape(pos) + r'(?:s|es)?\b', t_l) for pos in cat_rule['pos'])
+                has_neg = False
+                for neg in cat_rule['neg']:
+                    if cat_key == 'jacket' and neg in ('jeans', 'jean') and re.search(r'\bjacket', t_l):
+                        continue
+                    if re.search(r'\b' + re.escape(neg) + r'(?:s|es)?\b', t_l):
+                        has_neg = True
+                        break
                 if has_pos and not has_neg:
                     if max_price is None or (p.price_num and p.price_num <= max_price):
                         matched.append(p)
@@ -1671,11 +2118,38 @@ def execute_search_and_validate(
         qu_cat = getattr(qu, 'category', None)
     if qu_cat and (not category or category in (
         'Electronics', 'Clothing_Shoes_and_Jewelry', 'Home_and_Kitchen',
-        'Cell_Phones_and_Accessories', 'Sports_and_Outdoors'
+        'Cell_Phones_and_Accessories', 'Sports_and_Outdoors', 'clothing'
     )):
         category = qu_cat
 
+    norm_q = (query or '').strip().lower()
+    brands_tuple = tuple(sorted(str(b).lower() for b in (brands or [])))
+    cache_key = f"{norm_q}|{category}|{max_price}|{min_price}|{brands_tuple}|{top_n}"
+    wants_cheapest = bool(ents.get('wants_lowest_price')) or bool(getattr(qu, 'wants_lowest_price', False)) or bool(re.search(r'\b(?:cheapest|lowest\s*price|most\s*affordable|least\s*expensive|sasta|saste|kam\s*daam)\b', query or '', re.I))
+    cached = _get_cached_search(cache_key, target_n=top_n, wants_cheapest=wants_cheapest)
+    if cached is not None:
+        prods, diag = cached
+        print(f"[SearchCache] HIT for q={query!r} -> Rotated {len(prods)} products for fresh results")
+        return prods, diag
+
     raw_results = _fetch_from_search_apis(query, fetch_n)
+
+    # If first attempt returns 0 results and query is long/descriptive, retry with simplified query
+    if not raw_results:
+        simple_parts = []
+        if brands:
+            simple_parts.append(brands[0])
+        simple_term = ents.get('product_name') or category or audio_type
+        if simple_term and simple_term not in ('product', 'item'):
+            simple_parts.append(simple_term)
+        elif query:
+            words = [w for w in query.split() if w.lower() not in ('under', 'below', 'rs', 'inr', 'rupees', 'best', 'top', 'cheap', 'budget', 'for', 'with')]
+            simple_parts.extend(words[:3])
+        if simple_parts:
+            retry_q = ' '.join(simple_parts).strip()
+            if retry_q and retry_q.lower() != query.lower():
+                print(f"[Search] Initial query yielded 0 results. Retrying with simplified query: {retry_q!r}")
+                raw_results = _fetch_from_search_apis(retry_q, fetch_n)
 
     # ── Normalize raw items ───────────────────────────────────────────────────
     normalized_candidates = [normalize_raw_item(it, query) for it in raw_results]
@@ -1700,7 +2174,9 @@ def execute_search_and_validate(
         )
 
         if v_res.valid:
-            accepted_results.append(v_res)
+            cand_dict = p.to_dict()
+            if not any(is_duplicate_product(cand_dict, acc.product.to_dict()) for acc in accepted_results):
+                accepted_results.append(v_res)
         else:
             rejected_records.append({
                 'title':   p.title,
@@ -1724,7 +2200,59 @@ def execute_search_and_validate(
         wants_lowest_price=wants_cheapest,
     )
 
-    final_products = [p.to_dict() for p in ranked_products[:top_n]]
+    # Target minimum products to show (at least 6 by default, or exact count if explicitly requested)
+    explicit_count = ents.get('count') or getattr(qu, 'count', None)
+    target_min = explicit_count if (explicit_count and isinstance(explicit_count, int) and explicit_count > 0) else max(top_n, DEFAULT_COUNT)
+
+    final_products = deduplicate_products([p.to_dict() for p in ranked_products])[:target_min]
+
+    # ── STEP 1b: Backfill when valid results < target_min ─────────────────────
+    if len(final_products) < target_min:
+        # 1. Backfill from candidate pool: items matching category & budget with soft/unknown specs
+        for p_cand in normalized_candidates:
+            if len(final_products) >= target_min:
+                break
+            cand_dict = p_cand.to_dict()
+            if any(is_duplicate_product(cand_dict, existing) for existing in final_products):
+                continue
+            if p_cand.is_accessory:
+                continue
+            if max_price is not None and (p_cand.price_num or 0) > max_price:
+                continue
+            if min_price is not None and (p_cand.price_num or 0) < min_price:
+                continue
+
+            v_relaxed = validate_product(
+                prod=p_cand,
+                target_category=category,
+                audio_type=audio_type,
+                want_brands=brands,
+                max_price=max_price,
+                min_price=min_price,
+                tech_specs={},
+                want_colors=[],
+                hard_requirements=[],
+                category_confidence=cat_conf,
+                want_gender=gender,
+            )
+            if v_relaxed.valid:
+                final_products.append(cand_dict)
+
+        # 2. If still below target_min, backfill from curated static catalog
+        if len(final_products) < target_min:
+            catalog_items = _get_static_catalog_fallback(query, ents, count=target_min)
+            for cat_item in catalog_items:
+                if len(final_products) >= target_min:
+                    break
+                if any(is_duplicate_product(cat_item, existing) for existing in final_products):
+                    continue
+                final_products.append(cat_item)
+
+    final_products = deduplicate_products(final_products)
+
+    # Slice to exact requested count if user asked for a specific number (e.g. 2 best products)
+    if explicit_count and isinstance(explicit_count, int) and explicit_count > 0:
+        final_products = final_products[:explicit_count]
 
     diagnostics = {
         'query': query,
@@ -1737,52 +2265,59 @@ def execute_search_and_validate(
 
     # ── STEP 2: When no exact match satisfies all constraints ─────────────────
     if not final_products:
-        if max_price is not None:
-            # 2a. User specified a budget: Search without budget restriction for the SAME requirements
-            try:
-                from src.alternatives_engine import find_smart_alternatives
-                alt_products, alt_meta = find_smart_alternatives(
-                    query=query,
-                    ents=ents,
-                    candidate_products=normalized_candidates,
-                    rejected_records=rejected_records,
-                    top_n=top_n,
+        if normalized_candidates:
+            if max_price is not None:
+                # 2a. Candidates exist but failed budget: search alternatives
+                try:
+                    from src.alternatives_engine import find_smart_alternatives
+                    alt_products, alt_meta = find_smart_alternatives(
+                        query=query,
+                        ents=ents,
+                        candidate_products=normalized_candidates,
+                        rejected_records=rejected_records,
+                        top_n=top_n,
+                    )
+                    if alt_products:
+                        final_products = alt_products
+                        diagnostics['is_alternative'] = True
+                        diagnostics['alternative_meta'] = alt_meta
+                        print(f"[AlternativesEngine] Discovered {len(alt_products)} smart alternatives for q={query!r}")
+                except Exception as e:
+                    print(f"[AlternativesEngine] Error finding alternatives: {e}")
+
+            # 2b. If still no products and candidates exist (no budget was set), try safe relaxation
+            if not final_products and max_price is None:
+                relaxed = _relax_existing_candidates(
+                    normalized_candidates, category, audio_type, brands, max_price,
+                    min_price, gender, top_n, cat_conf,
                 )
-                if alt_products:
-                    final_products = alt_products
+                if relaxed:
+                    final_products = relaxed
                     diagnostics['is_alternative'] = True
-                    diagnostics['alternative_meta'] = alt_meta
-                    print(f"[AlternativesEngine] Discovered {len(alt_products)} smart alternatives for q={query!r}")
-            except Exception as e:
-                print(f"[AlternativesEngine] Error finding alternatives: {e}")
+                    print(f"[Search] Using {len(relaxed)} already-fetched listings after constraint relaxation.")
 
-        # 2b. If still no products and candidates exist (e.g. no budget was set), try safe relaxation (no accessories)
-        if not final_products and normalized_candidates and max_price is None:
-            relaxed = _relax_existing_candidates(
-                normalized_candidates, category, audio_type, brands, max_price,
-                min_price, gender, top_n, cat_conf,
-            )
-            if relaxed:
-                final_products = relaxed
-                diagnostics['is_alternative'] = True
-                print(f"[Search] Using {len(relaxed)} already-fetched listings after constraint relaxation.")
-
-    # 2c. Guaranteed fallback: if final_products is still empty, synthesize realistic products matching the query
-    if not final_products:
-        print(f"[Search] Running guaranteed Indian catalog / AI fallback for q={query!r}")
-        fallback_prods = _groq_product_fallback(query, ents, count=top_n)
-        if fallback_prods:
-            final_products = fallback_prods
-            diagnostics['is_fallback'] = True
-            print(f"[Search] Fallback generated {len(fallback_prods)} products.")
+        # If no verified live products were found matching the exact constraints, return empty list
+        # Never synthesize fake products, fabricated prices, or fake links.
+        if not final_products:
+            print(f"[Search] No verified live products found matching all constraints for q={query!r}")
 
     print(f"[Validator] q={query!r} | retrieved={len(normalized_candidates)} "
           f"| accepted={len(accepted_results)} | rejected={len(rejected_records)} "
           f"| final={len(final_products)} (is_alternative={bool(not accepted_results and final_products)})")
     if rejected_records and len(accepted_results) == 0:
         sample_reasons = [r['reasons'] for r in rejected_records[:3]]
-        print(f"[Validator] Sample rejection reasons: {sample_reasons}")
+    final_products = deduplicate_products(deduplicate_product_images(final_products))
 
+    # Store full candidate pool in cache so subsequent repeat queries rotate new products
+    valid_pool = deduplicate_products(list(final_products))
+    for p_cand in normalized_candidates:
+        if not p_cand.is_accessory and (max_price is None or (p_cand.price_num or 0) <= max_price):
+            cand_d = p_cand.to_dict()
+            if not any(is_duplicate_product(cand_d, existing) for existing in valid_pool):
+                valid_pool.append(cand_d)
+
+    valid_pool = deduplicate_products(valid_pool)
+    _set_cached_search(cache_key, valid_pool, diagnostics)
     return final_products, diagnostics
 
 
@@ -1796,9 +2331,11 @@ def fetch_one(query: str, ents: dict, top_n: int = DEFAULT_COUNT) -> list[dict]:
         top_n = min(count, 10)
     elif top_n <= 0:
         top_n = DEFAULT_COUNT
+    else:
+        top_n = max(top_n, DEFAULT_COUNT)
 
     products, _ = execute_search_and_validate(query, ents, top_n=top_n)
-    return products
+    return deduplicate_products(products)
 
 
 def fetch_comparison(queries: list[dict], ents: dict, per_brand: int = 3) -> dict[str, list]:
@@ -1814,25 +2351,22 @@ def fetch_comparison(queries: list[dict], ents: dict, per_brand: int = 3) -> dic
         brand_ents = dict(ents)
         brand_ents['brands'] = [label]
         prods, _ = execute_search_and_validate(q_str, brand_ents, top_n=per_brand)
-        return label, prods
+        return label, deduplicate_products(prods)
 
     with ThreadPoolExecutor(max_workers=max(1, len(queries))) as executor:
         results = list(executor.map(fetch_brand, queries))
 
     res_dict: dict[str, list] = {}
-    seen_links: set[str] = set()
+    all_seen: list[dict] = []
 
     for label, prods in results:
         unique = []
         for p in prods:
-            link = p.get('link', '')
-            if link and link not in seen_links:
-                seen_links.add(link)
-                unique.append(p)
-            elif not link:
+            if not any(is_duplicate_product(p, seen_p) for seen_p in all_seen):
+                all_seen.append(p)
                 unique.append(p)
             if len(unique) >= per_brand:
                 break
-        res_dict[label] = unique
+        res_dict[label] = deduplicate_products(unique)
 
     return res_dict

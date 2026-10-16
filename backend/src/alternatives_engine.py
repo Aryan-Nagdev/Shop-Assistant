@@ -20,6 +20,7 @@ from src.live_search import (
     _scrapingdog,
     _rank_validated_products,
 )
+from src.product_deduplicator import deduplicate_products, is_duplicate_product
 
 
 def find_smart_alternatives(
@@ -86,14 +87,9 @@ def find_smart_alternatives(
                 raw_unconstrained = _scrapingdog(unconstrained_q, num=16)
             norm_unconstrained = [normalize_raw_item(it, unconstrained_q) for it in raw_unconstrained]
 
-            # If search APIs returned nothing, use Groq / static catalog fallback without budget restriction
+            # Never synthesize fake products if live search APIs returned nothing
             if not norm_unconstrained:
-                from src.live_search import _groq_product_fallback
-                ents_unconstrained = dict(ents)
-                ents_unconstrained['max_price'] = None
-                ents_unconstrained['hard_requirements'] = [hr for hr in hard_reqs if not hr.startswith('price <=')]
-                fb_items = _groq_product_fallback(unconstrained_q, ents_unconstrained, count=top_n)
-                norm_unconstrained = [normalize_raw_item(it, unconstrained_q) for it in fb_items]
+                norm_unconstrained = []
 
             for p in norm_unconstrained:
                 if p.is_accessory:
@@ -262,17 +258,22 @@ def find_smart_alternatives(
         if in_budget_candidates:
             # Sort by rating and price fit
             in_budget_candidates.sort(key=lambda x: (x[0].rating or 0, -(x[0].price_num or 0)), reverse=True)
-            for bp, reason in in_budget_candidates[:2]:
+            for bp, reason in in_budget_candidates:
+                if len(alternatives) >= top_n:
+                    break
                 bd = bp.to_dict()
                 bd['is_alternative'] = True
                 bd['alternative_type'] = 'spec_relaxed'
                 bd['alternative_diff'] = reason
                 bd['alternative_explanation'] = f"Fits your budget (₹{bp.price_num:,.0f}) but features {reason}."
-                if not in_budget_alt:
-                    in_budget_alt = bd
-                # Only add if not already in alternatives
-                if not any(a.get('link') == bd.get('link') for a in alternatives):
+                # Strictly prevent duplicate models, duplicate titles, or duplicate URLs
+                if not any(is_duplicate_product(bd, a) for a in alternatives):
+                    if not in_budget_alt:
+                        in_budget_alt = bd
                     alternatives.append(bd)
+
+    # Deduplicate entire alternative set to guarantee every card is distinct
+    alternatives = deduplicate_products(alternatives)
 
     # ══════════════════════════════════════════════════════════════════════════
     # COMPOSE ALTERNATIVE DIAGNOSTICS & EXPLANATION SUMMARY

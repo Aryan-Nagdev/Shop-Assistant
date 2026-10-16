@@ -271,6 +271,9 @@ class BrandRegistry:
                 pattern = r'\b' + re.escape(alias) + r'\b'
 
             if re.search(pattern, lower):
+                # Guard against false brand detection for "noise cancellation / cancelling / isolation / reduction"
+                if alias == 'noise' and re.search(r'\bnoise\s*(?:cancel(?:l?ation|ling)?|isolat(?:ion|ing)|reduction)\b|\b(?:active\s*noise|ambient\s*noise)\b', lower):
+                    continue
                 canonical = self.alias_to_canonical[alias]
                 if canonical not in detected_brands:
                     detected_brands.append(canonical)
@@ -290,6 +293,8 @@ class BrandRegistry:
                     continue
                 if len(norm_chunk) >= 3 and norm_chunk in self.norm_to_canonical:
                     if norm_chunk in _BRAND_EXCLUSION_WORDS:
+                        continue
+                    if norm_chunk == 'noise' and re.search(r'\bnoise\s*(?:cancel(?:l?ation|ling)?|isolat(?:ion|ing)|reduction)\b|\b(?:active\s*noise|ambient\s*noise)\b', lower):
                         continue
                     canonical = self.norm_to_canonical[norm_chunk]
                     if canonical not in detected_brands:
@@ -329,6 +334,8 @@ class BrandRegistry:
                             continue
 
                         canonical = self.alias_to_canonical[matched_alias]
+                        if canonical == 'Noise' and re.search(r'\bnoise\s*(?:cancel(?:l?ation|ling)?|isolat(?:ion|ing)|reduction)\b|\b(?:active\s*noise|ambient\s*noise)\b', text, re.I):
+                            continue
                         if canonical not in detected_brands:
                             detected_brands.append(canonical)
                             corrections[chunk] = canonical
@@ -374,7 +381,7 @@ _PRODUCT_CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ('shoes',           re.compile(r'\b(?:shoes?|sneakers?|footwear|running\s+shoes?|sports\s+shoes?|loafers?|sandals?|snikers|slippers?|boots?|flip\s*flops?|heels?|flats?)\b', re.I)),
     ('t-shirt',         re.compile(r'\b(?:t[\s-]?shirts?|tees?|polo\s+shirts?|tshirt)\b', re.I)),
     ('shirt',           re.compile(r'\b(?:formal\s+shirts?|casual\s+shirts?|(?<!t[\s-])shirts?)\b', re.I)),
-    ('jeans',           re.compile(r'\b(?:jeans?|denims?)\b', re.I)),
+    ('jeans',           re.compile(r'\b(?:jeans?|denims)\b(?!\s*jacket)', re.I)),
     ('watch',           re.compile(r'\b(?:watch(?:es)?|wrist\s*watch(?:es)?)\b', re.I)),
     ('tablet',          re.compile(r'\b(?:tablets?|ipads?|tabs?)\b', re.I)),
     ('camera',          re.compile(r'\b(?:cameras?|dslrs?|mirrorless|camra|gopros?)\b', re.I)),
@@ -431,8 +438,8 @@ _CATEGORY_VOCAB: list[str] = [
     "microwave", "air fryer", "water purifier", "geyser", "mixer grinder", "induction",
     "vacuum cleaner", "fan", "air purifier", "iron", "hoodie", "jacket", "kurta",
     "saree", "dress", "trouser", "sunglasses", "smart bulb", "furniture", "fitness",
-    "office wear", "formal wear", "clothing", "apparel", "wear", "cotton", "linen",
-    "denim", "blazer", "college", "sneakers",
+    "office wear", "formal wear", "clothing", "apparel", "wear",
+    "blazer", "college", "sneakers",
 ]
 _CATEGORY_VOCAB_SET: set[str] = set(_CATEGORY_VOCAB)
 
@@ -653,9 +660,9 @@ _SPEC_RULES: list[tuple[str, list[tuple[re.Pattern, Any]]]] = [
          lambda m: f"{m.group(1)}{m.group(2).upper()} {m.group(3).upper() if m.group(3).upper() in ('SSD','HDD','NVME') else ''}".strip()),
         # TB Storage: 1tb, 2tb
         (re.compile(r'\b(\d+)\s*tb\b', re.I), lambda m: f"{m.group(1)}TB SSD"),
-        # Standalone storage numbers: 512 ssd, 256 ssd, 512gb ssd
-        (re.compile(r'\b(128|256|512|1024|2048)\s*(?:gb\s*)?(ssd|hdd|storage)\b', re.I),
-         lambda m: f"{m.group(1)}GB {m.group(2).upper()}"),
+        # Standalone storage numbers: 512 ssd, 256 ssd, 512gb ssd, 128GB
+        (re.compile(r'\b(128|256|512|1024|2048)\s*(?:gb)?\s*(ssd|hdd|storage|rom)?\b', re.I),
+         lambda m: f"{m.group(1)}GB {m.group(2).upper()}" if m.group(2) else f"{m.group(1)}GB"),
     ]),
 
     ("display", [
@@ -671,7 +678,8 @@ _SPEC_RULES: list[tuple[str, list[tuple[re.Pattern, Any]]]] = [
     ]),
 
     ("battery", [
-        (re.compile(r'\b(\d{4,5})\s*mah\b', re.I), lambda m: f"{m.group(1)}mAh"),
+        (re.compile(r'\b(\d{1,2}[,\s]?\d{3})\s*mah\b', re.I),
+         lambda m: f"{re.sub(r'[^0-9]', '', m.group(1))}mAh"),
         (re.compile(r'\b(\d+)\s*(?:hours?|hrs?|h)\s*(?:battery|playtime|backup)\b', re.I), lambda m: f"{m.group(1)} hours"),
         (re.compile(r'\b(?:good|long|big|best)\s*battery\b', re.I), lambda m: "good battery"),
     ]),
@@ -724,6 +732,29 @@ def _detect_gender(text: str) -> str | None:
 
 
 
+_CLOTHING_SIZES = (
+    'extra large', 'plus size', 'free size', 'xxxl', 'xxl', 'xl',
+    'xs', 'small', 'medium', 'large',
+)
+
+
+def _extract_size(text: str) -> str | None:
+    lower = text.lower()
+    for size in _CLOTHING_SIZES:
+        if re.search(r'\b' + re.escape(size) + r'\b', lower):
+            return size
+    m = re.search(r'\bsize\s*[:\-]?\s*(xxxl|xxl|xl|xs|[sml])\b', lower)
+    if m:
+        return m.group(1)
+    m = re.search(r'\b(xxxl|xxl|xl|xs)\b', lower)
+    if m:
+        return m.group(1)
+    if re.search(r'\bsize\s+(?:s|m|l)\b|\b(?:s|m|l)\s+size\b', lower):
+        token = re.search(r'\b(s|m|l)\b', lower)
+        return token.group(1) if token else None
+    return None
+
+
 def _extract_specifications(text: str) -> dict[str, str]:
     """Extract hardware specifications from query text."""
     specs: dict[str, str] = {}
@@ -740,12 +771,23 @@ def _extract_specifications(text: str) -> dict[str, str]:
                     specs[spec_name] = str(val)
                     break
 
-    # Contextual check for bare "512 ssd" or "512" near laptop context
-    if "storage" not in specs:
-        m = re.search(r'\b(128|256|512|1024)\b(?=\s*(?:ssd|hdd|gb|storage|laptop|pc|phone))', lower)
+    # Do not treat RAM-sized numbers as storage (8/16GB), and treat 128/256/512GB as storage
+    ram_val = specs.get('ram', '').lower()
+    if 'storage' not in specs:
+        m = re.search(r'\b(128|256|512|1024|2048)\s*(?:gb)?\b', lower)
         if m:
-            unit = "GB SSD" if "ssd" in lower else "GB"
-            specs["storage"] = f"{m.group(1)}{unit}"
+            specs['storage'] = f"{m.group(1)}GB"
+        elif ram_val:
+            leftovers = re.findall(r'\b(\d+)\s*gb\b', lower)
+            for num in leftovers:
+                token = f"{num}gb"
+                if token not in ram_val.replace(' ', '') and num not in ('2', '3', '4', '6', '8', '12', '16', '24', '32'):
+                    specs['storage'] = f"{num}GB"
+                    break
+
+    size = _extract_size(text)
+    if size:
+        specs['size'] = size
 
     return specs
 
@@ -762,21 +804,27 @@ def _extract_price_range(text: str) -> dict[str, int | None]:
     price = {"min": None, "max": None}
     lower = text.lower()
 
-    # Range pattern: "between 20k and 30k" / "20k to 30k" / "20000 - 30000"
+    # Range pattern: requires explicit price indicators (between/from/currency symbol/k)
     m_range = re.search(
-        r'(?:between|from)?\s*[₹₨$rs\.]*\s*(\d[\d,]*)\s*(k\b|thousand\b)?\s*(?:to|and|-)\s*[₹₨$rs\.]*\s*(\d[\d,]*)\s*(k\b|thousand\b)?',
+        r'(?:(between|from)\s+)?([₹₨$]|rs\.?\s*)?(\d[\d,]*)\s*(k\b|thousand\b)?\s*(?:to|and|-)\s*([₹₨$]|rs\.?\s*)?(\d[\d,]*)\s*(k\b|thousand\b)?',
         lower
     )
     if m_range:
-        v1 = int(m_range.group(1).replace(',', ''))
-        if m_range.group(2) or v1 < 100:  # e.g. 20 -> 20k
-            v1 *= 1000
-        v2 = int(m_range.group(3).replace(',', ''))
-        if m_range.group(4) or v2 < 100:
-            v2 *= 1000
-        price["min"] = min(v1, v2)
-        price["max"] = max(v1, v2)
-        return price
+        has_prefix = bool(m_range.group(1))
+        has_curr = bool(m_range.group(2) or m_range.group(5) or 'rs' in m_range.group(0) or '₹' in m_range.group(0))
+        has_k = bool(m_range.group(4) or m_range.group(7))
+        # Only treat as price range if there is a valid price context (avoids parsing model numbers like 132 and 141)
+        if has_prefix or has_curr or has_k:
+            v1 = int(m_range.group(3).replace(',', ''))
+            if m_range.group(4) or (v1 < 100 and has_k):  # e.g. 20 -> 20k
+                v1 *= 1000
+            v2 = int(m_range.group(6).replace(',', ''))
+            if m_range.group(7) or (v2 < 100 and has_k):
+                v2 *= 1000
+            if v1 >= 500 or v2 >= 500 or has_curr or has_k:
+                price["min"] = min(v1, v2)
+                price["max"] = max(v1, v2)
+                return price
 
     # Max price: under / below / less than / upto / max / budget of / within
     m_max = re.search(
@@ -875,6 +923,15 @@ def _classify_requirements(
     # Hardware Specifications:
     # Explicit specs (i5, 16GB, 512GB SSD, dedicated GPU, 5000mAh, ANC) are HARD.
     # Qualitative specs (good camera, good battery) are SOFT unless framed mandatorily.
+    _PRODUCT_CONTEXT_WORDS = {
+        'shirt', 't-shirt', 'tshirt', 'jeans', 'jacket', 'pants', 'trousers',
+        'shoes', 'sneakers', 'watch', 'bag', 'dress', 'kurta', 'hoodie',
+        'sweater', 'trouser', 'shorts', 'top', 'blouse', 'skirt', 'leggings',
+        'sandals', 'slippers', 'boots', 'heels', 'wallet', 'purse', 'backpack',
+        'laptop', 'phone', 'tablet', 'earbuds', 'headphones', 'keyboard', 'chair',
+    }
+    _has_product_context = bool(category) or any(w in lower for w in _PRODUCT_CONTEXT_WORDS)
+
     for spec_name, val in specs.items():
         spec_entry = f"{spec_name}: {val}"
         is_qualitative = val in ("good camera", "good battery", "clear camera")
@@ -882,7 +939,8 @@ def _classify_requirements(
 
         if is_qualitative and not is_mandatory:
             soft.append(spec_entry)
-        elif spec_name == 'material' and not is_mandatory:
+        elif spec_name == 'material' and not is_mandatory and not _has_product_context:
+            # Material is soft ONLY when absolutely no product context exists
             soft.append(spec_entry)
         else:
             hard.append(spec_entry)
@@ -923,7 +981,7 @@ _NO_SEARCH_SIGNALS = re.compile(
 _SEARCH_SIGNALS = re.compile(
     r'\b(?:show\s+me|find\s+me|give\s+me|get\s+me|'
     r'recommend|suggest|buy|purchase|order|'
-    r'available|in\s+stock|products?|listings?|'
+    r'available|in\s+stock|(?:show|find|search|list|get)\s+products?|'
     r'where\s+can\s+i\s+(?:buy|get|find)|'
     r'price|under\s*[₹₨$]?\s*\d|below\s*[₹₨$]?\s*\d|'
     r'within\s*[₹₨$]?\s*\d|upto?\s*[₹₨$]?\s*\d|'
@@ -940,6 +998,27 @@ _INFO_PATTERNS = re.compile(
     r'how\s+to\s+choose)\b',
     re.I,
 )
+
+# Material and specification explanation patterns (properties, benefits, tradeoffs, durability)
+_MATERIAL_EXPLAIN_RE = re.compile(
+    r'\b(?:explain\s+(?:.*(?:rivet|hardware|zipper|material|fabric|leather|cotton|brass|copper|steel|titanium|polymer|nylon|wool|silk|polyester|gore-tex)|the\s+material)|'
+    r'tell\s+me\s+about\s+.*(?:used\s+(?:for|in)|properties|benefits|tradeoffs?|material|build|durability)|'
+    r'(?:properties|benefits|tradeoffs?|durability|characteristics)\s+of\b|'
+    r'what\s+(?:is|are)\s+(?:the\s+)?(?:key\s+)?(?:properties|benefits|tradeoffs|characteristics)\b|'
+    r'what\s+(?:is\s+it|is\s+this|are\s+they)\s+made\s+of\b|'
+    r'made\s+of|upper\s+material|main\s+body|what\s+does\s+.*mean|explain\s+the\s+material|'
+    r'why\s+is\s+.*used\s+(?:for|in)|is\s+this\s+(?:real\s+)?(?:cotton|leather|silk|wool|linen))\b',
+    re.I,
+)
+
+# Direct recommendation inquiries ("What are the best...", "Which are the best...")
+_BEST_PRODUCT_RE = re.compile(
+    r'\b(?:what\s+(?:is|are|was|were)\s+(?:the\s+)?(?:best|top|recommended|good)|'
+    r'which\s+(?:is|are)\s+(?:the\s+)?(?:best|top|recommended)|'
+    r'best\s+(?:\w+\s+)?(?:laptops?|phones?|shoes?|earbuds?|headphones?|products?))\b',
+    re.I,
+)
+
 # Strong comparison patterns — definitive brand/product comparison signals
 _COMPARISON_STRONG = re.compile(
     r'\bvs\.?\b|\bversus\b|\bcompare\b|\bcomparison\b|\bcompre\b|\bcomapre\b|'
@@ -993,24 +1072,52 @@ def _detect_intent_signals(text: str, detected_brands: list[str] | None = None) 
     """
     lower = text.lower()
     has_price = bool(re.search(r'(?:under|below|upto?|within|around)\s*[₹₨$]?\s*\d', lower))
+    has_buy_signal = bool(re.search(r'\b(?:buy|order|purchase|where\s+to\s+buy)\b', lower))
     has_product_or_brand = bool(_PRODUCT_BRAND_RE.search(text)) or bool(detected_brands)
 
-    # ── Explicit no-search instruction (wins over everything) ──────────────────
+    # ── 1. Explicit no-search instruction (wins over everything) ──────────────────
     if _NO_SEARCH_SIGNALS.search(text):
         if _COMPARISON_PATTERNS.search(text) or (detected_brands and len(detected_brands) >= 2):
             return 'comparison', False
         return 'information', False
 
-    # ── Material queries (what material / what is it made of / explain material) ───
-    if re.search(
-        r'\b(?:material|fabric|what\s+(?:is\s+it|is\s+this|are\s+they)\s+made\s+of|'
-        r'made\s+of|upper\s+material|main\s+body|what\s+does\s+.*mean|explain\s+the\s+material|'
-        r'tell\s+me\s+about\s+.*(?:used\s+for|material|plastic|aluminum)|is\s+this\s+cotton)\b',
-        text, re.I,
-    ) and not has_price and not bool(re.search(r'\b(?:buy|order|purchase)\b', text, re.I)):
+    # ── 2. Material / Spec / Component inquiry (Properties, Benefits, Tradeoffs) ─
+    # Never trigger product recommendations when the user is asking for material information!
+    if _MATERIAL_EXPLAIN_RE.search(text) and not has_price and not has_buy_signal:
         return 'information', False
 
-    # ── Information queries (what is / explain / how does) ─────────────────────
+    # Advice / attribute questions that are not a buy request
+    if re.search(
+        r'\b(?:what\s+(?:is|are)\s+the\s+best\s+material|best\s+material\s+for|'
+        r'which\s+material\s+(?:is\s+)?best|is\s+this\s+(?:real\s+)?leather|'
+        r'does\s+this\s+(?:laptop|phone|product)\s+have)\b',
+        text, re.I,
+    ) and not has_price and not bool(re.search(r'\b(?:buy|order|purchase|suggest|find|show)\b', text, re.I)):
+        return 'information', False
+
+    # ── 3. Direct "What are the best X" product recommendations / comparisons ────
+    # Users asking "What are the best Dell and HP gaming laptops?" want recommendations/comparison with products
+    if _BEST_PRODUCT_RE.search(text):
+        if detected_brands and len(detected_brands) >= 2:
+            return 'comparison', True
+        return 'recommendation', True
+
+    # ── 4. Multi-brand comparison signal (2+ brands detected in query) ────────────
+    # E.g. "which laptop is best hp or dell", "compare nike and adidas", "hp or dell"
+    if detected_brands and len(detected_brands) >= 2:
+        return 'comparison', True
+
+    # ── 5. Strong comparison signals (vs/compare/X or Y/difference between) ───────
+    if _COMPARISON_STRONG.search(text):
+        return 'comparison', True
+
+    # ── 5b. Multi-model listing/comparison (e.g. "boAt Airdopes 131, 132, and 141") ────
+    # When multiple specific model numbers are listed under a brand/category
+    model_nums = re.findall(r'\b\d{2,4}[a-z]?\b', text)
+    if len(model_nums) >= 2 and has_product_or_brand and not has_price:
+        return 'comparison', True
+
+    # ── 6. Information queries (what is / explain / how does) ─────────────────────
     if _INFO_PATTERNS.search(text) and not _SEARCH_SIGNALS.search(text):
         if re.search(
             r'\b(?:this|these|that|them|the\s+(?:shoe|product|one)|which\s+one)\b',
@@ -1019,16 +1126,7 @@ def _detect_intent_signals(text: str, detected_brands: list[str] | None = None) 
             return 'information', False
         return 'information', False
 
-    # ── Multi-brand comparison signal (2+ brands detected in query) ────────────
-    # E.g. "which laptop is best hp or dell", "compare nike and adidas", "hp or dell"
-    if detected_brands and len(detected_brands) >= 2:
-        return 'comparison', True
-
-    # ── Strong comparison signals (vs/compare/X or Y/difference between) ───────
-    if _COMPARISON_STRONG.search(text):
-        return 'comparison', True
-
-    # ── Weak comparison (better than / which is better) ────────────────────────
+    # ── 7. Weak comparison (better than / which is better) ────────────────────────
     # Only treat as comparison if product/brand nouns are present.
     # Otherwise route to information — e.g. "Is OLED better than LCD?" has no
     # brands/products and is a concept question.
@@ -1040,11 +1138,11 @@ def _detect_intent_signals(text: str, detected_brands: list[str] | None = None) 
             # Concept question without products/brands → information
             return 'information', False
 
-    # ── Recommendation signals (suggest / recommend / best / which is best) ───
+    # ── 8. Recommendation signals (suggest / recommend / best / which is best) ───
     if _RECOMMENDATION_PATTERNS.search(text):
         return 'recommendation', True
 
-    # ── Explicit product search signals (specs/category + price constraint) ────
+    # ── 9. Explicit product search signals (specs/category + price constraint) ────
     if has_price:
         return 'product_search', True
 
@@ -1070,6 +1168,7 @@ class QueryUnderstanding:
         'brands',
         'brand_confidence',
         'price',
+        'count',
         'specifications',
         'color',
         'color_confidence',
@@ -1090,6 +1189,7 @@ class QueryUnderstanding:
         self.original_query: str = ""
         self.normalized_query: str = ""
         self.wants_lowest_price: bool = False
+        self.count: int | None = None
         self.category: str | None = None
         self.category_confidence: float = 0.0
         self.audio_type: str | None = None
@@ -1128,6 +1228,7 @@ class QueryUnderstanding:
             "brands": self.brands,
             "brand_confidence": self.brand_confidence,
             "price": self.price,
+            "count": self.count,
             "specifications": self.specifications,
             "color": self.color,
             "use_case": self.use_case,
@@ -1262,6 +1363,37 @@ def _apply_vocabulary_typo_corrections(text: str) -> tuple[str, dict[str, str]]:
     return ' '.join(corrected), corrections_map
 
 
+def _extract_count(query: str) -> int | None:
+    """Extract explicit requested item count (e.g. 'only 2 best products', 'suggest 3', 'top 2')."""
+    lower = query.lower()
+    cm0 = re.search(r'\b(?:only|just|exactly)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b', lower)
+    cm1 = re.search(r'(?:suggest|show|find|recommend|give|get|display|list)\s+(?:me\s+)?(?:only\s+|just\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b', lower)
+    cm2 = re.search(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:best|top|good|great|products?|items?|options?|choices?)\b', lower)
+    cm2b = re.search(r'\b(?:best|top)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b', lower)
+    cm3 = re.search(r'(?:shirts?|phones?|laptops?|shoes?|earbuds?|headphones?|kurtas?|jeans|products?|backpacks?|bags?)\s+(\d+)\s*$', lower)
+
+    raw_n = None
+    if cm0: raw_n = cm0.group(1)
+    elif cm1: raw_n = cm1.group(1)
+    elif cm2: raw_n = cm2.group(1)
+    elif cm2b: raw_n = cm2b.group(1)
+    elif cm3: raw_n = cm3.group(1)
+
+    if raw_n:
+        words_num = {
+            'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+            'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+        }
+        raw_n = raw_n.strip().lower()
+        if raw_n in words_num:
+            return words_num[raw_n]
+        try:
+            return int(raw_n)
+        except ValueError:
+            return None
+    return None
+
+
 def understand(query: str) -> QueryUnderstanding:
     """
     Main query understanding entry point.
@@ -1312,24 +1444,36 @@ def understand(query: str) -> QueryUnderstanding:
             break
     qu.audio_type = detected_audio
 
-    # ── Step 6: Category Resolution ───────────────────────────────────────────
+    # ── Step 6: Category Resolution (product type wins over material) ─────────
+    from src.product_constraints import detect_product_type, detect_materials
+
     if detected_audio:
         qu.category = detected_audio
         qu.category_confidence = 1.0
     else:
-        for cat_name, pattern in _PRODUCT_CATEGORY_PATTERNS:
-            if pattern.search(qu.normalized_query) or pattern.search(qu.original_query):
-                qu.category = cat_name
-                # If category was matched via a typo correction, lower confidence slightly
-                # so the validator doesn't reject borderline-valid product titles
-                if any(c == cat_name for c in qu.corrected_words.values()):
-                    qu.category_confidence = 0.85
-                else:
-                    qu.category_confidence = 1.0
-                break
+        type_from_catalog = detect_product_type(qu.normalized_query) or detect_product_type(qu.original_query)
+        if type_from_catalog:
+            qu.category = type_from_catalog
+            qu.category_confidence = 1.0
+        else:
+            for cat_name, pattern in _PRODUCT_CATEGORY_PATTERNS:
+                if cat_name in ('jeans',) and detect_materials(qu.normalized_query):
+                    # 'denim' is a material — do not treat it as jeans when another type exists
+                    if not pattern.search(qu.normalized_query.replace('denim', ' ')):
+                        continue
+                if pattern.search(qu.normalized_query) or pattern.search(qu.original_query):
+                    qu.category = cat_name
+                    if any(c == cat_name for c in qu.corrected_words.values()):
+                        qu.category_confidence = 0.85
+                    else:
+                        qu.category_confidence = 1.0
+                    break
 
     # ── Step 7: Price Extraction ──────────────────────────────────────────────
     qu.price = _extract_price_range(qu.normalized_query)
+
+    # ── Step 7b: Count Extraction ─────────────────────────────────────────────
+    qu.count = _extract_count(raw_query) or _extract_count(qu.normalized_query)
 
     # ── Step 8: Specification Extraction ──────────────────────────────────────
     qu.specifications = _extract_specifications(qu.normalized_query)

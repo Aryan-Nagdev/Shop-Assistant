@@ -177,7 +177,7 @@ CATEGORY_MAP = [
      'Clothing_Shoes_and_Jewelry', 'T-Shirts', 't-shirts'),
     (['shirt', 'formal shirt', 'casual shirt'],
      'Clothing_Shoes_and_Jewelry', 'Shirts', 'shirts'),
-    (['jeans', 'denim', 'skinny jeans', 'slim fit jeans'],
+    (['jeans', 'skinny jeans', 'slim fit jeans', 'denim jeans'],
      'Clothing_Shoes_and_Jewelry', 'Jeans', 'jeans'),
     (['trouser', 'pants', 'chinos', 'formal pant'],
      'Clothing_Shoes_and_Jewelry', 'Trousers', 'trousers'),
@@ -300,6 +300,8 @@ FASHION_OCCASIONS = [
 
 # ── Vague-query → concrete logic ───────────────────────────────────────────────
 # Each entry maps a signal word to search-relevant expansions + NLU hints
+# ── Vague-query → concrete logic ───────────────────────────────────────────────
+# Each entry maps a signal word to search-relevant expansions + NLU hints
 VAGUE_SIGNALS = {
     'cheap':           {'price_tier': 'budget', 'vague_hint': ''},
     'affordable':      {'price_tier': 'budget', 'vague_hint': ''},
@@ -313,14 +315,14 @@ VAGUE_SIGNALS = {
     'camera phone':    {'feature_priority': 'camera', 'vague_hint': 'high megapixel camera best camera phone'},
     'best camera':     {'feature_priority': 'camera', 'vague_hint': 'high megapixel 108mp best camera'},
     'good camera':     {'feature_priority': 'camera', 'vague_hint': 'high megapixel camera'},
-    'good battery':    {'feature_priority': 'battery', 'vague_hint': '5000mAh long battery life'},
-    'long battery':    {'feature_priority': 'battery', 'vague_hint': '6000mAh battery endurance'},
-    'big battery':     {'feature_priority': 'battery', 'vague_hint': '5000mAh 6000mAh battery'},
+    'good battery':    {'feature_priority': 'battery', 'vague_hint': 'long battery life'},
+    'long battery':    {'feature_priority': 'battery', 'vague_hint': 'long battery life'},
+    'big battery':     {'feature_priority': 'battery', 'vague_hint': 'long battery life'},
     'gaming':          {'feature_priority': 'gaming', 'vague_hint': 'gaming high performance'},
     'fast charging':   {'feature_priority': 'charging', 'vague_hint': '65W fast charging'},
-    'lightweight':     {'feature_priority': 'weight', 'vague_hint': 'lightweight thin ultrabook'},
-    'durable':         {'feature_priority': 'durability', 'vague_hint': 'rugged durable ip68'},
-    'waterproof':      {'feature_priority': 'durability', 'vague_hint': 'waterproof ip68 ip67'},
+    'lightweight':     {'feature_priority': 'weight', 'vague_hint': 'lightweight'},
+    'durable':         {'feature_priority': 'durability', 'vague_hint': 'durable'},
+    'waterproof':      {'feature_priority': 'durability', 'vague_hint': 'waterproof'},
 }
 
 # Price tier → implied budget ranges (INR)
@@ -364,18 +366,39 @@ def _detect_multi_items(query: str) -> list[str]:
     """
     If query contains 2+ distinct product categories joined by conjunctions,
     return list of individual product dept names.
+    Ignores feature specifications (camera, battery, display, etc.) attached to a primary product.
     """
     q = query.lower()
+
+    # Prepositional feature clauses ("with a good camera and long battery life")
+    # are attributes of a single product, NOT multi-item purchase requests
+    if re.search(r'\b(?:with|having|featuring|equipped\s+with)\b', q):
+        if not re.search(r'\b(?:combo|bundle|set\s+of)\b', q):
+            return []
+
+    # Camera/battery specs modifying a phone or laptop are NOT separate products
+    if re.search(r'\b(?:good|best|great|triple|dual|high\s*megapixel|\d+mp)\s*cam(?:era)?\b|\bcamera\s*phone\b|\bphone\s*camera\b', q):
+        if re.search(r'\b(?:phones?|mobiles?|smartphones?)\b', q):
+            return []
+
     parts = _MULTI_ITEM_RE.split(q)
     if len(parts) < 2:
         return []
 
     matched_cats = []
+    has_phone = bool(re.search(r'\b(?:phones?|mobiles?|smartphones?)\b', q))
+
     for part in parts:
         part = part.strip()
         if not part:
             continue
+        # Skip parts that are clearly feature descriptions (e.g. "good camera", "long battery life", "16gb ram")
+        if re.search(r'\b(?:good|best|great|long|big|fast|battery|backup|life|ram|storage|display|screen|charging)\b', part):
+            continue
         for kw_list, _cat, dept, _fk in CATEGORY_MAP:
+            # If dept is 'Cameras' and query has 'phone' and not dedicated camera keywords (dslr, gopro)
+            if dept == 'Cameras' and has_phone and not re.search(r'\b(?:dslr|mirrorless|action\s*camera|gopro)\b', part):
+                continue
             for kw in kw_list:
                 if re.search(r'\b' + re.escape(kw) + r'\b', part):
                     if dept not in matched_cats:
@@ -414,13 +437,11 @@ def detect_intent(query: str) -> str:
                 or re.search(r'\bvs\.?\b|\bversus\b|\bcompare\b|\bcompre\b|\bcomapre\b', q):
             return 'comparison'
 
-    # 2. Fashion pairing
+    # 2. Fashion pairing — only explicit pairing language, never "jacket for men"
     if re.search(
-        r'\bpair with\b|\bgo with\b|\bmatch with\b'
-        r'|\bfor (?:a |my )?(?:' + '|'.join(FASHION_PAIRING.keys()) + r')\b'
-        r'|\b(?:' + '|'.join(FASHION_PAIRING.keys()) + r') for\b', q):
-        return 'pairing'
-    if re.search(r'\bsuggest\b.+\b(?:jeans|shirt|kurta|shoes|jacket|top)\b.+\bfor\b', q):
+        r'\bpair with\b|\bgo with\b|\bmatch with\b|\bto wear with\b',
+        q,
+    ):
         return 'pairing'
 
     # 3. Single best — explicit request for one specific best choice
@@ -530,6 +551,8 @@ def extract_entities(query: str) -> dict:
     # ── Brands — whole-word match only ──────────────────────────────────────────
     found = []
     for b_lower, b_display in KNOWN_BRANDS.items():
+        if b_lower == 'noise' and re.search(r'\bnoise\s*(?:cancel(?:l?ation|ling)?|isolat(?:ion|ing)|reduction)\b|\b(?:active\s*noise|ambient\s*noise)\b', q):
+            continue
         pattern = r'(?<![a-z])' + re.escape(b_lower) + r'(?![a-z])'
         if re.search(pattern, q) and b_display not in found:
             found.append(b_display)
@@ -576,26 +599,37 @@ def extract_entities(query: str) -> dict:
         ents['gender'] = 'unisex'
 
     # ── Count extraction — comprehensive patterns ────────────────────────────────
-    # Pattern 1: "suggest/show/give/recommend/find me N X"
+    # Pattern 0: "only / just N ..." e.g. "only 2 best products", "only 2", "just 3"
+    cm0 = re.search(
+        r'\b(?:only|just|exactly)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b',
+        q)
+    # Pattern 1: "suggest/show/give/recommend/find me (only/just) N X"
     cm1 = re.search(
-        r'(?:suggest|show|find|recommend|give|get)\s+(?:me\s+)?'
+        r'(?:suggest|show|find|recommend|give|get|display|list)\s+(?:me\s+)?(?:only\s+|just\s+)?'
         r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b',
         q)
-    # Pattern 2: "N best/top X"
+    # Pattern 2: "N best/top/products/options"
     cm2 = re.search(
-        r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:best|top|good|great)\b',
+        r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:best|top|good|great|products?|items?|options?|choices?)\b',
+        q)
+    cm2b = re.search(
+        r'\b(?:best|top)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b',
         q)
     # Pattern 3: bare "X N" at end, e.g. "t shirts 6"
     cm3 = re.search(
-        r'(?:shirts?|phones?|laptops?|shoes?|earbuds?|headphones?|kurtas?|jeans|products?)'
+        r'(?:shirts?|phones?|laptops?|shoes?|earbuds?|headphones?|kurtas?|jeans|products?|backpacks?|bags?)'
         r'\s+(\d+)\s*$',
         q)
 
     raw_n = None
-    if cm1:
+    if cm0:
+        raw_n = cm0.group(1)
+    elif cm1:
         raw_n = cm1.group(1)
     elif cm2:
         raw_n = cm2.group(1)
+    elif cm2b:
+        raw_n = cm2b.group(1)
     elif cm3:
         raw_n = cm3.group(1)
 
@@ -611,7 +645,16 @@ def extract_entities(query: str) -> dict:
         ents['pairing_color'] = pair_match.group(1) or None
         ents['pairing_item']  = pair_match.group(2) or None
 
-    # ── Category — first match wins ──────────────────────────────────────────────
+    # ── Category — product type first; never let material win ────────────────────
+    from src.product_constraints import detect_product_type, dept_for_category
+    typed = detect_product_type(q)
+    if typed and not ents['audio_type']:
+        dept, amazon_cat = dept_for_category(typed)
+        ents['category'] = typed
+        ents['product_type'] = typed
+        ents['amazon_category'] = amazon_cat
+        if dept:
+            ents['dept'] = dept
     # If audio_type is set, map to the right dept directly
     if ents['audio_type']:
         _AUDIO_DEPT_MAP = {
@@ -625,11 +668,17 @@ def extract_entities(query: str) -> dict:
         ents['category']      = cat
         ents['dept']          = dept
         ents['flipkart_dept'] = fk
-    else:
+    elif not ents.get('product_type'):
         for kw_list, cat, dept, fk_dept in CATEGORY_MAP:
             if any(re.search(r'\b' + re.escape(kw) + r'(?:es|s)?\b', q) for kw in kw_list):
                 ents['category']      = cat
                 ents['dept']          = dept
+                ents['flipkart_dept'] = fk_dept
+                break
+    else:
+        # Keep product_type; still fill flipkart dept from map when possible
+        for kw_list, cat, dept, fk_dept in CATEGORY_MAP:
+            if ents.get('dept') == dept:
                 ents['flipkart_dept'] = fk_dept
                 break
 
@@ -730,6 +779,8 @@ def _tech_token(tech: dict) -> str:
     parts = []
     for spec in ('cpu', 'processor', 'ram', 'storage', 'gpu', 'display', 'camera', 'battery', 'material'):
         val = tech.get(spec)
+        if spec == 'battery' and 'mah' not in str(val).lower():
+            continue
         if val and val not in parts:
             parts.append(val)
     return ' '.join(parts)
@@ -768,7 +819,8 @@ def _extract_product_name(q: str, ents: dict) -> str:
 
     # Remove vague signal words
     for signal in VAGUE_SIGNALS:
-        p = re.sub(r'\b' + re.escape(signal) + r'\b', '', p)
+        p = re.sub(r'\b' + re.escape(signal) + r'(?:\s+life|\s+backup)?\b', '', p)
+    p = re.sub(r'\b(?:battery\s+life|battery\s+backup|good\s+battery|long\s+battery|battery|life)\b', '', p, flags=re.I)
         
     # Remove general fillers and introductory words
     p = re.sub(r'\b(?:best|top|latest|suggest|recommend|show|find|get|me|i\s+want|i\s+need|looking\s+for|please|pls|india)\b', '', p)
@@ -878,18 +930,29 @@ def build_search_queries(query: str, intent: str, ents: dict) -> list[dict]:
     brand_s = brands[0] if brands else ''
     mat_s = ' '.join(ents.get('materials') or [])
     use_case = ents.get('use_case') or ''
-    if use_case == 'study':
+    is_clothing = dept in ("Men's Clothing", "Women's Clothing", "Kids", "Fashion", "Footwear")
+    if use_case == 'study' and is_clothing:
         vague_s = (vague_s + ' college casual wear').strip()
-    elif use_case == 'gym' and 'running' not in (product_term or '').lower():
+    elif use_case == 'gym' and is_clothing and 'running' not in (product_term or '').lower():
         vague_s = (vague_s + ' running').strip()
-    elif use_case == 'office' and 'office' not in (product_term or '').lower():
+    elif use_case == 'office' and is_clothing and 'office' not in (product_term or '').lower():
         vague_s = (vague_s + ' office formal').strip()
+
+    # Avoid noisy vague hints in electronics and bags (keeps Google queries clean)
+    if dept in ('Laptops', 'Gaming Laptops', 'Mobile Phones', 'Cameras', 'Bags', 'Luggage', 'Backpacks') or any(w in (product_term or '').lower() for w in ('laptop', 'phone', 'bag', 'backpack', 'camera')):
+        vague_s = ''
 
     # Avoid duplicating style if product_term already contains it
     if style_s and product_term and style_s.lower() in product_term.lower().split():
         style_s = ''
 
-    # Keep the shopping query clean — random suffixes caused empty Google Shopping hits
+    # Include battery spec in search query when specified (e.g. "10000mAh power bank")
+    battery_spec = (ents.get('tech_specs') or {}).get('battery') or ''
+    # Only include battery in query if it's a meaningful spec (mAh) and not for laptops
+    if battery_spec and 'mah' in battery_spec.lower() and 'laptop' not in (product_term or '').lower():
+        tech_s = (tech_s + ' ' + battery_spec).strip()
+
+    # Keep search query clean — extra noisy suffixes cause zero hits on Google Shopping
     variation = ''
 
     base = _build_tokens(
@@ -900,7 +963,6 @@ def build_search_queries(query: str, intent: str, ents: dict) -> list[dict]:
         color_s, gender, style_s,
         vague_s,
         price_s,
-        variation,
     )
     # Deduplicate consecutive repeated words
     words = []

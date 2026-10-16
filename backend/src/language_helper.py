@@ -8,10 +8,10 @@ import re
 # Devanagari Unicode range
 DEVANAGARI_RE = re.compile(r'[\u0900-\u097F]')
 
-# Common Hinglish conversational markers
+# Common Hinglish conversational markers (distinct markers that don't collide with English)
 HINGLISH_KEYWORDS = {
     'chahiye', 'batao', 'dikhao', 'kaisa', 'kaise', 'konsa', 'kaunsa', 'kitne',
-    'sasta', 'achha', 'accha', 'sabse', 'ke andar', 'me', 'mein', 'wale', 'wali',
+    'sasta', 'achha', 'accha', 'sabse', 'ke andar', 'mein', 'wale', 'wali',
     'kare', 'karein', 'kharidna', 'kharide', 'lena', 'leni', 'liye', 'karo',
     'hoga', 'hogi', 'paise', 'rupaye', 'bataiye', 'dikhayein', 'bata do', 'saste'
 }

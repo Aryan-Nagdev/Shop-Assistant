@@ -89,9 +89,9 @@ def debug_search():
     import os, requests
     import config
     
-    serp_key = os.getenv("SERPAPI_KEY", "")
-    scrapingdog_key = os.getenv("SCRAPINGDOG_KEY", "")
-    groq_key = os.getenv("GROQ_API_KEY", "")
+    serp_key = config.get_serpapi_key()
+    scrapingdog_key = config.get_scrapingdog_key()
+    groq_key = config.get_groq_api_key()
     
     def safe_mask(k):
         if not k: return "MISSING/EMPTY"
@@ -106,21 +106,21 @@ def debug_search():
             'GROQ_API_KEY': safe_mask(groq_key)
         },
         'config_keys': {
-            'config.SERPAPI_KEY': safe_mask(config.SERPAPI_KEY),
-            'config.SCRAPINGDOG_KEY': safe_mask(config.SCRAPINGDOG_KEY)
+            'config.SERPAPI_KEY': safe_mask(serp_key),
+            'config.SCRAPINGDOG_KEY': safe_mask(scrapingdog_key)
         },
         'search_test': {}
     }
     
     # Test SerpAPI directly
-    if not config.SERPAPI_KEY:
+    if not serp_key:
         report['search_test']['serpapi'] = 'Skipped: key missing'
     else:
         try:
             params = {
                 'engine':   'google_shopping',
                 'q':        'best boat earbuds India',
-                'api_key':  config.SERPAPI_KEY,
+                'api_key':  serp_key,
                 'num':      5,
                 'gl':       'in',
                 'hl':       'en',

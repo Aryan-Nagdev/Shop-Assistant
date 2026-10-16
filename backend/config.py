@@ -9,14 +9,34 @@ load_dotenv()
 
 # ── Project root ───────────────────────────────────────────────────────────────
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(ROOT_DIR, ".env"))
-load_dotenv(os.path.join(os.path.dirname(ROOT_DIR), ".env"))
-load_dotenv()
+# Project root .env first, then backend/.env takes highest precedence
+load_dotenv(os.path.join(os.path.dirname(ROOT_DIR), ".env"), override=True)
+load_dotenv(os.path.join(ROOT_DIR, ".env"), override=True)
+
+# ── Dynamic API Key Getters (always reads latest from env / .env) ─────────────
+def get_serpapi_key() -> str:
+    k = os.getenv("SERPAPI_KEY", "").strip().strip("'\"")
+    return k
+
+def get_scrapingdog_key() -> str:
+    k = os.getenv("SCRAPINGDOG_KEY", "").strip().strip("'\"")
+    return k
+
+def get_groq_api_key() -> str:
+    k = os.getenv("GROQ_API_KEY", "").strip().strip("'\"")
+    return k
 
 # ── API Keys (from .env only — never hardcode) ────────────────────────────────
-SERPAPI_KEY     = os.getenv("SERPAPI_KEY", "").strip().strip("'\"")
-SCRAPINGDOG_KEY = os.getenv("SCRAPINGDOG_KEY", "").strip().strip("'\"")
-GROQ_API_KEY    = os.getenv("GROQ_API_KEY", "").strip().strip("'\"")
+SERPAPI_KEY     = get_serpapi_key()
+SCRAPINGDOG_KEY = get_scrapingdog_key()
+GROQ_API_KEY    = get_groq_api_key()
+
+# ── Valid Groq Model Names (ultra-fast, production ready) ─────────────────────
+GROQ_MODELS = [
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+]
 
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
@@ -29,6 +49,7 @@ if not SCRAPINGDOG_KEY:
     print("[WARNING] SCRAPINGDOG_KEY not set in .env — fallback search enabled.")
 if not GROQ_API_KEY:
     print("[WARNING] GROQ_API_KEY not set in .env — LLM reasoning will use fallback.")
+
 
 
 # ── SLM Model ─────────────────────────────────────────────────────────────────

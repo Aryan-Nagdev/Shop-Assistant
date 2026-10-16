@@ -32,7 +32,10 @@ import {
   Sparkle,
   Shirt,
   Laptop,
+  Smartphone,
   Headphones,
+  Footprints,
+  Package,
   Globe,
   ShoppingCart,
   Layers,
@@ -45,6 +48,74 @@ import {
 const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
   ? 'http://127.0.0.1:5000' 
   : (import.meta.env.VITE_API_BASE || '');
+
+// ── Component: ProductImage with verified model handling & elegant placeholder ──
+const ProductImage = ({ product, className = "w-full h-full object-cover", aspect = "aspect-square", compact = false, containerClassName = "", children }) => {
+  const initialUrl = product?.thumbnail || product?.fallback_thumbnail || product?.serpapi_thumbnail || product?.image || '';
+  const [srcUrl, setSrcUrl] = useState(initialUrl);
+  const [imgError, setImgError] = useState(!initialUrl);
+  const [imgLoaded, setImgLoaded] = useState(false);
+
+  useEffect(() => {
+    const nextUrl = product?.thumbnail || product?.fallback_thumbnail || product?.serpapi_thumbnail || product?.image || '';
+    setSrcUrl(nextUrl);
+    setImgError(!nextUrl);
+    setImgLoaded(false);
+  }, [product?.thumbnail, product?.fallback_thumbnail, product?.serpapi_thumbnail, product?.image]);
+
+  const handleImgError = () => {
+    const cur = srcUrl;
+    const fb = product?.fallback_thumbnail;
+    const sp = product?.serpapi_thumbnail;
+    if (fb && cur !== fb) {
+      setSrcUrl(fb);
+    } else if (sp && cur !== sp) {
+      setSrcUrl(sp);
+    } else {
+      setImgError(true);
+    }
+  };
+
+  if (imgError || !srcUrl) {
+    if (compact) {
+      return (
+        <div className={`relative ${aspect} bg-zinc-900 border border-zinc-800 rounded-xl flex items-center justify-center text-zinc-600 flex-shrink-0 select-none ${containerClassName}`}>
+          <ShoppingBag size={18} />
+          {children}
+        </div>
+      );
+    }
+    return (
+      <div className={`relative w-full ${aspect} bg-zinc-900/80 border border-zinc-800 rounded-xl flex flex-col items-center justify-center p-3 text-center select-none ${containerClassName}`}>
+        <div className="w-12 h-12 rounded-xl bg-zinc-800 border border-zinc-700/50 flex items-center justify-center text-zinc-500 mb-2">
+          <ShoppingBag size={22} />
+        </div>
+        <span className="text-[10px] font-bold text-zinc-400 line-clamp-1 px-1">
+          {product?.title ? product.title.split(/[\(\/,-]/)[0].trim() : (product?.brand || 'Product')}
+        </span>
+        {children}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`relative w-full ${aspect} bg-[#121214] rounded-xl overflow-hidden border border-zinc-800 ${containerClassName}`}>
+      {!imgLoaded && (
+        <div className="absolute inset-0 bg-zinc-800/40 animate-pulse" />
+      )}
+      <img
+        src={srcUrl}
+        alt={product?.title || 'Product'}
+        referrerPolicy="no-referrer"
+        loading="lazy"
+        onLoad={() => setImgLoaded(true)}
+        onError={handleImgError}
+        className={`${className} transition-opacity duration-200 ${imgLoaded ? 'opacity-100' : 'opacity-60'}`}
+      />
+      {children}
+    </div>
+  );
+};
 
 // ── 3D HARDWARE-ACCELERATED STARFIELD BACKGROUND ──
 const Starfield = ({ isSpeedUp }) => {
@@ -699,7 +770,24 @@ function App() {
 
       // 3. Append Assistant Message
       const isComparison = result.intent === 'comparison';
-      const rawProducts = Array.isArray(result.products) ? result.products : [];
+      let rawProducts = Array.isArray(result.products) ? result.products : [];
+      // Client-side deduplication safeguard: ensure every displayed card is a distinct product
+      const seenProductKeys = new Set();
+      rawProducts = rawProducts.filter(p => {
+        if (!p || !p.title) return false;
+        const cleanTitleKey = (p.title || '')
+          .toLowerCase()
+          .replace(/\([^)]*\)/g, '')
+          .replace(/\b(?:size|uk|us|eu)\s*[:\-]?\s*\d+\b/g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim()
+          .split(' ')
+          .slice(0, 5)
+          .join(' ');
+        if (!cleanTitleKey || seenProductKeys.has(cleanTitleKey)) return false;
+        seenProductKeys.add(cleanTitleKey);
+        return true;
+      });
       const hasComparisonProducts = isComparison && rawProducts.length > 0;
 
       let comparisonData = null;
@@ -851,6 +939,39 @@ function App() {
     c.messages.some(m => m.content.toLowerCase().includes(sidebarSearch.toLowerCase()))
   );
 
+  // ── Helper: Extract minimal product context for material/spec AI questions ────
+  const getMinimalProductContext = (product) => {
+    if (!product) return 'these products';
+    const rawCat = (product.category || product.dept || '').toLowerCase().trim();
+    const tLower = (product.title || '').toLowerCase();
+
+    // Check specific informative subcategories first
+    if (tLower.includes('cargo trouser') || tLower.includes('cargo pant') || tLower.includes('parachute trouser') || tLower.includes('parachute cargo')) {
+      return 'cargo trousers';
+    }
+    if (tLower.includes('gaming laptop')) return 'gaming laptops';
+    if (tLower.includes('running shoe') || tLower.includes('running sneaker')) return 'running shoes';
+    if (tLower.includes('t-shirt') || tLower.includes('tshirt')) return 't-shirts';
+    if (tLower.includes('formal shirt') || tLower.includes('casual shirt')) return 'shirts';
+    if (tLower.includes('denim jacket') || tLower.includes('leather jacket')) return 'jackets';
+    if (tLower.includes('trouser') || tLower.includes('pants')) return 'trousers';
+    if (tLower.includes('laptop')) return 'laptops';
+    if (tLower.includes('shoes') || tLower.includes('sneaker')) return 'shoes';
+
+    // If clean department or category is available
+    if (rawCat && !['electronics', 'clothing_shoes_and_jewelry', 'home_and_kitchen', 'cell_phones_and_accessories', 'apparel'].includes(rawCat)) {
+      return rawCat.endsWith('s') ? rawCat : `${rawCat}s`;
+    }
+
+    // Clean title: remove slash-separated spec codes, sizes, colors, and percentages
+    const title = (product.title || '').trim();
+    let base = title.split(/\s*[\/|]\s*|\s+-\s+|\s*\(/)[0].trim();
+    base = base.replace(/\b\d{2,3}(?:cm|mm|inch)?\b/gi, '').trim();
+    base = base.replace(/\b(?:black|white|blue|navy|grey|gray|green|red|olive|khaki|beige)\b/gi, '').trim();
+    base = base.replace(/\s+/g, ' ').trim();
+    return base.toLowerCase() || 'this product';
+  };
+
   // ── MaterialSection — Structured E-Commerce "Material & Build" Section ─────────
   const MaterialSection = ({ product, compact = false, onAskAI }) => {
     const key    = product?.title;
@@ -896,8 +1017,14 @@ function App() {
           {displayMats.map((m, i) => (
             <div 
               key={i} 
-              className="flex items-center justify-between px-2 py-1 text-[10px] hover:bg-zinc-800/40 transition-colors group/row"
-              title={m.description || `${m.part}: ${m.material}`}
+              className="flex items-center justify-between px-2 py-1 text-[10px] hover:bg-zinc-800/40 transition-colors group/row cursor-pointer"
+              title={m.description || `Ask AI about ${m.material} (${m.part})`}
+              onClick={(e) => {
+                if (onAskAI) {
+                  e.stopPropagation();
+                  onAskAI(m.part, m.material);
+                }
+              }}
             >
               <span className="text-zinc-400 font-medium truncate max-w-[45%] flex items-center gap-1">
                 <span className="w-1 h-1 rounded-full bg-indigo-400/70 shrink-0"></span>
@@ -1374,7 +1501,8 @@ function App() {
 
                                 // Build the "Ask AI about material" handler
                                 const handleAskMaterial = (part, material) => {
-                                  const question = `Tell me about ${material} used for the ${part} of products like the ${prod.title}. What are its key properties, benefits, and any tradeoffs?`;
+                                  const context = getMinimalProductContext(prod);
+                                  const question = `Tell me about ${material} used for the ${part} in ${context}. What are its key properties, benefits, and tradeoffs?`;
                                   setInputMessage(question);
                                   setTimeout(() => textareaRef.current?.focus(), 100);
                                 };
@@ -1385,31 +1513,14 @@ function App() {
                                     className="bg-chatSurface/80 backdrop-blur-md border border-zinc-800 rounded-2xl overflow-hidden flex flex-col p-4 space-y-3 transition-all hover:-translate-y-1 hover:shadow-2xl hover:border-zinc-700"
                                   >
                                     {/* Thumbnail container */}
-                                    <div className="relative w-full aspect-square bg-[#121214] rounded-xl overflow-hidden border border-zinc-800">
-                                      <img 
-                                        src={prod.thumbnail || prod.fallback_thumbnail || prod.serpapi_thumbnail} 
-                                        alt={prod.title} 
-                                        referrerPolicy="no-referrer"
-                                        loading="lazy"
-                                        onError={(e) => {
-                                          const cur = e.currentTarget.src;
-                                          const fb = prod.fallback_thumbnail;
-                                          const sp = prod.serpapi_thumbnail;
-                                          if (fb && cur !== fb) {
-                                            e.currentTarget.src = fb;
-                                          } else if (sp && cur !== sp) {
-                                            e.currentTarget.src = sp;
-                                          }
-                                        }}
-                                        className="w-full h-full object-cover" 
-                                      />
-                                      <span className="absolute top-2.5 left-2.5 bg-black/60 backdrop-blur-md border border-zinc-800 text-[9px] font-bold text-zinc-300 px-2 py-0.5 rounded-md">
+                                    <ProductImage product={prod} aspect="aspect-square">
+                                      <span className="absolute top-2.5 left-2.5 bg-black/60 backdrop-blur-md border border-zinc-800 text-[9px] font-bold text-zinc-300 px-2 py-0.5 rounded-md pointer-events-none z-10">
                                         {prod.source}
                                       </span>
                                       
                                       {/* Wishlist Heart Toggle */}
                                       <button 
-                                        className="absolute top-2.5 right-2.5 w-8 h-8 bg-black/70 backdrop-blur-md rounded-full flex items-center justify-center text-zinc-400 hover:text-rose-500 transition-all border border-zinc-800"
+                                        className="absolute top-2.5 right-2.5 w-8 h-8 bg-black/70 backdrop-blur-md rounded-full flex items-center justify-center text-zinc-400 hover:text-rose-500 transition-all border border-zinc-800 z-10"
                                         onClick={(e) => toggleWishlist(e, prod)}
                                         title={wishlisted ? "Remove from Wishlist" : "Save to Wishlist"}
                                       >
@@ -1423,7 +1534,7 @@ function App() {
                                       {/* Material analysis trigger badge on thumbnail */}
                                       {!matEntry && (
                                         <button
-                                          className="absolute bottom-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/70 border border-indigo-500/20 text-indigo-300 text-[8px] font-bold hover:bg-indigo-950/60 transition-all"
+                                          className="absolute bottom-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/70 border border-indigo-500/20 text-indigo-300 text-[8px] font-bold hover:bg-indigo-950/60 transition-all z-10"
                                           onClick={() => fetchMaterials(prod)}
                                           title="Load material breakdown"
                                         >
@@ -1431,7 +1542,7 @@ function App() {
                                           Materials
                                         </button>
                                       )}
-                                    </div>
+                                    </ProductImage>
 
                                     {/* Specifications */}
                                     <div className="flex-1 flex flex-col justify-between">
@@ -1767,7 +1878,8 @@ function App() {
               const wishlisted = isItemWishlisted(prod);
               const matEntry   = materialCache[prod.title];
               const handleSidebarAskMaterial = (part, material) => {
-                const question = `Tell me about ${material} used for the ${part} in products like the ${prod.title}. Properties, benefits, and tradeoffs?`;
+                const context = getMinimalProductContext(prod);
+                const question = `Tell me about ${material} used for the ${part} in ${context}. What are its key properties, benefits, and tradeoffs?`;
                 setInputMessage(question);
                 setTimeout(() => textareaRef.current?.focus(), 100);
               };
@@ -1776,35 +1888,18 @@ function App() {
                   key={idx}
                   className="bg-aiMessage/80 border border-zinc-800/80 rounded-2xl overflow-hidden flex flex-col p-4 space-y-3 transition-all hover:-translate-y-1 hover:shadow-2xl"
                 >
-                  <div className="relative w-full aspect-square bg-[#121214]/60 rounded-xl overflow-hidden border border-zinc-800">
-                    <img 
-                      src={prod.thumbnail || prod.fallback_thumbnail || prod.serpapi_thumbnail} 
-                      alt={prod.title} 
-                      referrerPolicy="no-referrer"
-                      loading="lazy"
-                      onError={(e) => {
-                        const cur = e.currentTarget.src;
-                        const fb = prod.fallback_thumbnail;
-                        const sp = prod.serpapi_thumbnail;
-                        if (fb && cur !== fb) {
-                          e.currentTarget.src = fb;
-                        } else if (sp && cur !== sp) {
-                          e.currentTarget.src = sp;
-                        }
-                      }}
-                      className="w-full h-full object-cover" 
-                    />
-                    <span className="absolute top-2 left-2 bg-black/60 backdrop-blur-md border border-zinc-800 text-[8px] font-bold text-zinc-300 px-2 py-0.5 rounded-md">
+                  <ProductImage product={prod} aspect="aspect-square" containerClassName="bg-[#121214]/60">
+                    <span className="absolute top-2 left-2 bg-black/60 backdrop-blur-md border border-zinc-800 text-[8px] font-bold text-zinc-300 px-2 py-0.5 rounded-md pointer-events-none z-10">
                       {prod.source}
                     </span>
                     <button 
-                      className="absolute top-2 right-2 w-7 h-7 bg-black/60 backdrop-blur-md rounded-full flex items-center justify-center text-zinc-400 hover:text-rose-500 transition-all border border-zinc-800"
+                      className="absolute top-2 right-2 w-7 h-7 bg-black/60 backdrop-blur-md rounded-full flex items-center justify-center text-zinc-400 hover:text-rose-500 transition-all border border-zinc-800 z-10"
                       onClick={(e) => toggleWishlist(e, prod)}
                       title={wishlisted ? "Remove from Wishlist" : "Save to Wishlist"}
                     >
                       <Heart size={13} fill={wishlisted ? '#EF4444' : 'none'} className={wishlisted ? 'text-rose-500' : ''} />
                     </button>
-                  </div>
+                  </ProductImage>
 
                   <div>
                     <span className="text-[9px] font-bold tracking-widest text-indigo-400 uppercase">{prod.brand}</span>
@@ -1936,29 +2031,13 @@ function App() {
                     className="p-4 bg-[#171717]/80 border border-zinc-800 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 hover:border-zinc-700 transition-all"
                   >
                     <div className="flex items-center gap-4 min-w-0">
-                      {item.thumbnail || item.fallback_thumbnail || item.serpapi_thumbnail ? (
-                        <img 
-                          src={item.thumbnail || item.fallback_thumbnail || item.serpapi_thumbnail} 
-                          alt={item.title} 
-                          referrerPolicy="no-referrer"
-                          loading="lazy"
-                          onError={(e) => {
-                            const cur = e.currentTarget.src;
-                            const fb = item.fallback_thumbnail;
-                            const sp = item.serpapi_thumbnail;
-                            if (fb && cur !== fb) {
-                              e.currentTarget.src = fb;
-                            } else if (sp && cur !== sp) {
-                              e.currentTarget.src = sp;
-                            }
-                          }}
-                          className="w-16 h-16 object-cover rounded-xl border border-zinc-800 flex-shrink-0" 
-                        />
-                      ) : (
-                        <div className="w-16 h-16 bg-zinc-900 rounded-xl border border-zinc-800 flex items-center justify-center text-zinc-600 flex-shrink-0">
-                          <ShoppingBag size={20} />
-                        </div>
-                      )}
+                      <ProductImage 
+                        product={item} 
+                        aspect="w-16 h-16" 
+                        compact={true} 
+                        className="w-16 h-16 object-cover rounded-xl"
+                        containerClassName="w-16 h-16 rounded-xl flex-shrink-0"
+                      />
                       <div className="min-w-0">
                         <span className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider">{item.brand}</span>
                         <h4 className="text-xs font-bold text-white line-clamp-1" title={item.title}>{item.title}</h4>
@@ -2164,7 +2243,8 @@ function App() {
         const qvMats     = qvMatEntry?.data || [];
         const handleQVAskMaterial = (part, material) => {
           setQuickViewProduct(null);
-          const question = `Tell me about ${material} used for the ${part} of the ${quickViewProduct.title}. Properties, benefits, durability, and tradeoffs?`;
+          const context = getMinimalProductContext(quickViewProduct);
+          const question = `Tell me about ${material} used for the ${part} in ${context}. What are its key properties, benefits, and tradeoffs?`;
           setInputMessage(question);
           setTimeout(() => textareaRef.current?.focus(), 150);
         };
@@ -2179,26 +2259,16 @@ function App() {
             <div className="flex flex-col md:flex-row">
               {/* Image panel */}
               <div className="md:w-2/5 relative bg-[#121214]/60 flex items-center justify-center border-b md:border-b-0 md:border-r border-zinc-800 p-6 flex-shrink-0">
-                <img 
-                  src={quickViewProduct.thumbnail || quickViewProduct.fallback_thumbnail || quickViewProduct.serpapi_thumbnail} 
-                  alt={quickViewProduct.title} 
-                  referrerPolicy="no-referrer"
-                  loading="lazy"
-                  onError={(e) => {
-                    const cur = e.currentTarget.src;
-                    const fb = quickViewProduct.fallback_thumbnail;
-                    const sp = quickViewProduct.serpapi_thumbnail;
-                    if (fb && cur !== fb) {
-                      e.currentTarget.src = fb;
-                    } else if (sp && cur !== sp) {
-                      e.currentTarget.src = sp;
-                    }
-                  }}
-                  className="w-full aspect-square object-cover rounded-2xl border border-zinc-800" 
-                />
-                <span className="absolute top-4 left-4 bg-black/60 border border-zinc-800 text-[10px] font-bold text-white px-2 py-0.5 rounded-lg">
-                  {quickViewProduct.source}
-                </span>
+                <ProductImage 
+                  product={quickViewProduct} 
+                  aspect="aspect-square" 
+                  className="w-full h-full object-cover rounded-2xl"
+                  containerClassName="w-full aspect-square rounded-2xl"
+                >
+                  <span className="absolute top-4 left-4 bg-black/60 border border-zinc-800 text-[10px] font-bold text-white px-2 py-0.5 rounded-lg z-10">
+                    {quickViewProduct.source}
+                  </span>
+                </ProductImage>
               </div>
 
               {/* Spec details */}
@@ -2325,7 +2395,9 @@ function App() {
                   {qvMats.map((m, i) => (
                     <div
                       key={i}
-                      className="flex flex-col sm:flex-row sm:items-center justify-between px-3.5 py-2.5 hover:bg-zinc-800/30 transition-colors gap-1 sm:gap-3 group/spec"
+                      onClick={() => handleQVAskMaterial(m.part, m.material)}
+                      className="flex flex-col sm:flex-row sm:items-center justify-between px-3.5 py-2.5 hover:bg-zinc-800/50 transition-colors gap-1 sm:gap-3 group/spec cursor-pointer"
+                      title={`Ask AI about ${m.material} (${m.part})`}
                     >
                       {/* Attribute / Component Name */}
                       <div className="sm:w-1/3 shrink-0 flex items-center gap-1.5">
